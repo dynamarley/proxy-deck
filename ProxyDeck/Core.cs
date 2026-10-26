@@ -105,12 +105,15 @@ namespace ProxyDeck
         readonly SemaphoreSlim lifecycle = new SemaphoreSlim(1, 1);
         readonly SemaphoreSlim refresh = new SemaphoreSlim(1, 1);
         readonly Dictionary<string, string> names = new Dictionary<string, string>();
+        readonly Func<string, string, int, Task<string>> command;
+        readonly Func<bool, Task> networkService;
         Process proxyProcess;
         bool proxyStartedHere;
         bool authBlocked;
         DateTimeOffset lastNetworkCheck = DateTimeOffset.MinValue, lastQuotaRefresh = DateTimeOffset.MinValue;
-        internal Controller()
+        internal Controller(Func<string, string, int, Task<string>> execute = null, Func<bool, Task> service = null)
         {
+            command = execute ?? Run; networkService = service ?? SetNetworkService;
             http = new HttpClient(new HttpClientHandler { UseProxy = false });
             http.Timeout = TimeSpan.FromSeconds(6);
         }
@@ -200,17 +203,17 @@ namespace ProxyDeck
             return result;
         }
 
-        async Task ReadNetwork(bool ensureServe)
+        async Task ReadNetwork(bool ensureServe, bool enabling = false)
         {
-            if (!SettingsStore.Current.UseTailscale) { View.NetworkReady = false; View.RemoteUrl = ""; return; }
+            if (!SettingsStore.Current.UseTailscale && !enabling) { View.NetworkReady = false; View.RemoteUrl = ""; return; }
             View.NetworkReady = false;
             lastNetworkCheck = DateTimeOffset.UtcNow;
-            var status = Json.Parse(await Run(Paths.Tailscale, "status --json", 8000));
+            var status = Json.Parse(await command(Paths.Tailscale, "status --json", 8000));
             string state = Json.Str(status, "BackendState");
             if (ensureServe && state == "Stopped")
             {
-                await Run(Paths.Tailscale, "up --timeout=15s", 20000);
-                status = Json.Parse(await Run(Paths.Tailscale, "status --json", 8000));
+                await command(Paths.Tailscale, "up --timeout=15s", 20000);
+                status = Json.Parse(await command(Paths.Tailscale, "status --json", 8000));
                 state = Json.Str(status, "BackendState");
             }
             View.NetworkReady = state == "Running";
@@ -226,18 +229,19 @@ namespace ProxyDeck
             if (dns.Length == 0) { View.NetworkReady = false; throw new NetworkSetupException("Complete the Tailscale MagicDNS and HTTPS setup."); }
             try
             {
-                var serve = Json.Parse(await Run(Paths.Tailscale, "serve status --json", 8000));
+                var serve = Json.Parse(await command(Paths.Tailscale, "serve status --json", 8000));
                 var web = Json.Map(Json.Get(serve, "Web"));
                 var node = Json.Map(Json.Get(web, endpoint));
                 var handler = Json.Map(Json.Get(Json.Map(Json.Get(node, "Handlers")), "/"));
                 if (Json.Str(handler, "Proxy") != Paths.Api)
                 {
                     View.NetworkReady = false;
+                    if (handler.Count > 0) throw new NetworkSetupException("This Tailscale port serves another app. Choose a different port in Setup & components.");
                     if (ensureServe)
                     {
-                        await Run(Paths.Tailscale, "serve --bg --yes --https=" + SettingsStore.Current.Port + " " + Paths.Api, 15000);
+                        await command(Paths.Tailscale, "serve --bg --yes --https=" + SettingsStore.Current.Port + " " + Paths.Api, 15000);
                         // Confirm the persistent handler, including after first-time Serve consent.
-                        var verified = Json.Parse(await Run(Paths.Tailscale, "serve status --json", 8000));
+                        var verified = Json.Parse(await command(Paths.Tailscale, "serve status --json", 8000));
                         var configured = Json.Map(Json.Get(Json.Map(Json.Get(verified, "Web")), endpoint));
                         View.NetworkReady = Json.Str(Json.Map(Json.Get(Json.Map(Json.Get(configured, "Handlers")), "/")), "Proxy") == Paths.Api;
                     }
@@ -246,6 +250,115 @@ namespace ProxyDeck
             }
             catch (Exception error) { View.NetworkReady = false; if (error is NetworkSetupException) throw; throw new NetworkSetupException("Enable Tailscale HTTPS/Serve, then check the connection again."); }
             lastNetworkCheck = DateTimeOffset.UtcNow;
+        }
+
+        internal static Task SetNetworkService(bool running)
+        {
+            return Task.Run(() =>
+            {
+                if (!running)
+                {
+                    string vendorUi = Path.Combine(Path.GetDirectoryName(Paths.Tailscale), "tailscale-ipn.exe");
+                    foreach (var process in MatchingProcesses(vendorUi))
+                        try { process.Kill(); process.WaitForExit(2000); } finally { process.Dispose(); }
+                }
+                using (var service = new ServiceController("Tailscale"))
+                {
+                    if (service.Status == ServiceControllerStatus.StopPending) service.WaitForStatus(ServiceControllerStatus.Stopped, TimeSpan.FromSeconds(15));
+                    service.Refresh();
+                    if (running)
+                    {
+                        if (service.Status == ServiceControllerStatus.Stopped) service.Start();
+                        service.WaitForStatus(ServiceControllerStatus.Running, TimeSpan.FromSeconds(20));
+                    }
+                    else if (service.Status != ServiceControllerStatus.Stopped)
+                    {
+                        service.Stop(); service.WaitForStatus(ServiceControllerStatus.Stopped, TimeSpan.FromSeconds(15));
+                    }
+                }
+            });
+        }
+
+        async Task EnsureNetworkAsync(bool enabling = false)
+        {
+            await networkService(true);
+            Exception failure = null;
+            for (int i = 0; i < 8; i++)
+            {
+                try { await ReadNetwork(true, enabling); return; }
+                catch (Exception error) { if (error is NetworkSetupException) throw; failure = error; }
+                if (i < 7) await Task.Delay(1000);
+            }
+            throw failure;
+        }
+
+        internal bool TailscaleConfigured
+        {
+            get
+            {
+                if (!File.Exists(Paths.Tailscale)) return false;
+                try
+                {
+                    string value = ConfigEditor.Read(File.ReadAllText(Path.Combine(Paths.Proxy, "config.yaml")), "management", "allow-remote");
+                    return value.Split('#')[0].Trim() == "true";
+                }
+                catch { return false; }
+            }
+        }
+
+        internal async Task SetWarmupAsync(bool enabled)
+        {
+            if (!await lifecycle.WaitAsync(0)) return;
+            View.Busy = true; Stage("Updating Auto Warm");
+            await refresh.WaitAsync();
+            try
+            {
+                if (!View.Desired || !View.ProxyReady) throw new InvalidOperationException("Start CLIProxy before changing Auto Warm.");
+                var settings = await Api(Paths.Fleet + "/settings", false);
+                settings["enable_reset_probe"] = enabled;
+                await Api(Paths.Fleet + "/settings", HttpMethod.Put, settings);
+                var confirmed = await Api(Paths.Fleet + "/settings", false);
+                View.Warmup = Json.Bool(confirmed, "enable_reset_probe");
+                if (View.Warmup != enabled) throw new InvalidOperationException("Auto Warm did not change. Refresh and try again.");
+                var options = SettingsStore.Current.Copy(); options.AutoWarm = enabled; SettingsStore.Save(options);
+            }
+            finally { refresh.Release(); View.Busy = false; lifecycle.Release(); Signal(); }
+        }
+
+        internal async Task SetTailscaleAsync(bool enabled)
+        {
+            if (!await lifecycle.WaitAsync(0)) return;
+            View.Busy = true; Stage(enabled ? "Enabling Tailscale" : "Disabling Tailscale");
+            await refresh.WaitAsync();
+            try
+            {
+                if (!View.Desired || !View.ProxyReady) throw new InvalidOperationException("Start CLIProxy before changing Tailscale access.");
+                if (enabled)
+                {
+                    await EnsureNetworkAsync(true);
+                }
+                else
+                {
+                    var serve = Json.Parse(await command(Paths.Tailscale, "serve status --json", 8000));
+                    if (OwnsServeHandler(serve))
+                    {
+                        await command(Paths.Tailscale, "serve --bg --yes --https=" + SettingsStore.Current.Port + " --set-path=/ off", 15000);
+                        if (OwnsServeHandler(Json.Parse(await command(Paths.Tailscale, "serve status --json", 8000))))
+                            throw new InvalidOperationException("Tailscale access is still enabled. Try again.");
+                    }
+                    if (SettingsStore.Current.ExclusiveTailscale) await networkService(false);
+                    View.NetworkReady = false; View.RemoteUrl = "";
+                }
+                var options = SettingsStore.Current.Copy(); options.UseTailscale = enabled; SettingsStore.Save(options);
+                View.Error = "";
+            }
+            finally { refresh.Release(); View.Busy = false; lifecycle.Release(); Signal(); }
+        }
+
+        static bool OwnsServeHandler(Dictionary<string, object> serve)
+        {
+            return Json.Map(Json.Get(serve, "Web")).Any(entry => entry.Key.EndsWith(":" + SettingsStore.Current.Port, StringComparison.Ordinal) &&
+                Json.Str(Json.Map(Json.Get(Json.Map(Json.Get(Json.Map(entry.Value), "Handlers")), "/")), "Proxy") == Paths.Api);
         }
 
         internal async Task StartAsync()
@@ -260,23 +373,8 @@ namespace ProxyDeck
                 try
                 {
                 Stage("Preparing Tailscale");
-                await Task.Run(() =>
-                {
-                    using (var service = new ServiceController("Tailscale"))
-                    {
-                        if (service.Status == ServiceControllerStatus.StopPending) service.WaitForStatus(ServiceControllerStatus.Stopped, TimeSpan.FromSeconds(15));
-                        service.Refresh();
-                        if (service.Status == ServiceControllerStatus.Stopped) service.Start();
-                        service.WaitForStatus(ServiceControllerStatus.Running, TimeSpan.FromSeconds(20));
-                    }
-                });
-                // Persisted Tailscale login and Serve configuration survive service stops.
-                for (int i = 0; i < 8; i++)
-                {
-                    try { await ReadNetwork(true); networkError = null; break; }
-                    catch (Exception error) { networkError = error; if (error is NetworkSetupException) break; }
-                    if (i < 7) await Task.Delay(1000);
-                }
+                // Persisted login and Serve configuration survive service stops.
+                await EnsureNetworkAsync();
                 }
                 catch (Exception error) { networkError = error; }
                 }
@@ -434,7 +532,7 @@ namespace ProxyDeck
         internal async Task LoginTailscaleAsync()
         {
             if (!File.Exists(Paths.Tailscale)) throw new InvalidOperationException("Install the Tailscale component first.");
-            await Run(Paths.Tailscale, "login --timeout=15s", 20000);
+            await command(Paths.Tailscale, "login --timeout=15s", 20000);
         }
 
         internal async Task StopAsync()
@@ -449,22 +547,8 @@ namespace ProxyDeck
                     {
                         try { if (proxyStartedHere || SettingsStore.Current.ManageExistingProxy) { process.Kill(); process.WaitForExit(5000); } } finally { process.Dispose(); }
                     }
-                    if (!SettingsStore.Current.UseTailscale || !SettingsStore.Current.ExclusiveTailscale) return;
-                    // Close the vendor tray UI so it cannot reconnect after the service is stopped.
-                    string vendorUi = Path.Combine(Path.GetDirectoryName(Paths.Tailscale), "tailscale-ipn.exe");
-                    foreach (var process in MatchingProcesses(vendorUi))
-                    {
-                        try { process.Kill(); process.WaitForExit(2000); } finally { process.Dispose(); }
-                    }
-                    using (var service = new ServiceController("Tailscale"))
-                    {
-                        if (service.Status != ServiceControllerStatus.Stopped)
-                        {
-                            if (service.Status != ServiceControllerStatus.StopPending) service.Stop();
-                            service.WaitForStatus(ServiceControllerStatus.Stopped, TimeSpan.FromSeconds(15));
-                        }
-                    }
                 });
+                if (SettingsStore.Current.UseTailscale && SettingsStore.Current.ExclusiveTailscale) await networkService(false);
                 View.ProxyReady = false; View.NetworkReady = false; Stage("SYSTEM STOPPED"); Paths.Log("stack stopped");
             }
             catch (Exception error) { View.Error = Friendly(error); Stage("Shutdown failed"); Paths.Log("stop failed: " + error.GetType().Name); }

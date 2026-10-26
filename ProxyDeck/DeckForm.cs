@@ -42,23 +42,14 @@ namespace ProxyDeck
                 g.FillPolygon(brush, new[] { new PointF(x + size * .55f, y + size * .33f), new PointF(x + size, y + size * .05f), new PointF(x + size * .9f, y + size * .67f), new PointF(x + size * .55f, y + size) });
             }
         }
-        internal static Icon Icon(int? percent, bool active)
+        internal static Icon Icon(bool active)
         {
             using (var bitmap = new Bitmap(32, 32))
             {
                 using (var g = Graphics.FromImage(bitmap))
                 {
                     g.SmoothingMode = SmoothingMode.AntiAlias; g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
-                    if (percent.HasValue)
-                    {
-                        string value = percent.Value.ToString();
-                        using (var font = new Font("Segoe UI", value.Length == 3 ? 17 : 23, FontStyle.Bold, GraphicsUnit.Pixel))
-                        using (var brush = new SolidBrush(active ? Color.White : Muted))
-                        using (var format = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
-                            g.DrawString(value, font, brush, new RectangleF(0, -2, 32, 32), format);
-                        using (var pen = new Pen(active ? Mint : Muted, 2)) g.DrawLine(pen, 6, 30, 26, 30);
-                    }
-                    else Mark(g, 5, 4, 23, active ? Red : Muted);
+                    Mark(g, 3, 3, 26, active ? Red : Muted);
                 }
                 IntPtr handle = bitmap.GetHicon();
                 try { using (var original = System.Drawing.Icon.FromHandle(handle)) return (Icon)original.Clone(); }
@@ -73,19 +64,21 @@ namespace ProxyDeck
         const float DesignWidth = 360, CardHeight = 144, CardStride = 154, AccountsTop = 172, Footer = 168;
         readonly Controller controller;
         readonly Dictionary<string, RectangleF> hits = new Dictionary<string, RectangleF>();
+        readonly ToolTip tips = new ToolTip { InitialDelay = 350, AutoPopDelay = 10000 };
         float zoom = 1, scroll;
         string hover = "", toast = "";
         DateTimeOffset toastUntil;
         bool refreshing;
         internal bool Preview;
         internal event Action ContextRequested;
+        internal event Action TailscaleSetupRequested;
         internal DeckForm(Controller model)
         {
             controller = model; Text = "Proxy Deck"; FormBorderStyle = FormBorderStyle.None; ShowInTaskbar = false;
             StartPosition = FormStartPosition.Manual; TopMost = true; BackColor = Art.Back; AutoScaleMode = AutoScaleMode.None;
             SetStyle(ControlStyles.AllPaintingInWmPaint | ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.ResizeRedraw, true);
             using (var g = Graphics.FromHwnd(IntPtr.Zero)) zoom = Math.Max(1, g.DpiX / 96f);
-            using (var icon = Art.Icon(null, true)) Icon = (Icon)icon.Clone();
+            using (var icon = Art.Icon(true)) Icon = (Icon)icon.Clone();
             SetSizeAndPosition();
             Deactivate += (s, e) => { if (!Preview) Hide(); };
             KeyPreview = true;
@@ -135,6 +128,14 @@ namespace ProxyDeck
         }
         void Hit(string id, float x, float y, float width, float height) { hits[id] = new RectangleF(x, y, width, height); }
         Color Hovered(string id, Color normal, Color brighter) { return hover == id ? brighter : normal; }
+        void DrawSwitch(Graphics g, string id, bool enabled, float x, float y)
+        {
+            Color color = controller.View.Busy ? Art.Muted : enabled ? Art.Mint : Art.Muted;
+            Art.Label(g, enabled ? "On" : "Off", x - 28, y - 2, 24, 10, color, true, true);
+            Art.Box(g, new RectangleF(x, y, 32, 17), enabled ? Color.FromArgb(27, 97, 80) : Color.FromArgb(48, 54, 63), 9, false);
+            using (var brush = new SolidBrush(color)) g.FillEllipse(brush, x + (enabled ? 17 : 3), y + 3, 11, 11);
+            Hit(id, x - 30, y - 5, 66, 27);
+        }
         void DrawButton(Graphics g, string id, string text, float x, float y, float width, bool danger)
         {
             var c = Hovered(id, danger ? Color.FromArgb(37, 23, 29) : Color.FromArgb(27, 31, 38), danger ? Color.FromArgb(58, 29, 37) : Color.FromArgb(38, 44, 53));
@@ -188,8 +189,7 @@ namespace ProxyDeck
             var g = e.Graphics; g.Clear(Art.Back); g.ScaleTransform(zoom, zoom); g.SmoothingMode = SmoothingMode.AntiAlias; g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
             hits.Clear(); var view = controller.View; float height = ClientSize.Height / zoom;
             Art.Mark(g, 20, 18, 23, Art.Red);
-            Art.Label(g, "PROXY DECK", 54, 16, 180, 13, Art.Text, true, false);
-            Art.Label(g, "Your personal Codex hub", 54, 35, 195, 10, Art.Muted, false, false);
+            Art.Label(g, "PROXY DECK", 54, 22, 180, 13, Art.Text, true, false);
             if (hover == "refresh") Art.Box(g, new RectangleF(279, 17, 27, 27), Color.FromArgb(30, 34, 42), 7, false);
             using (var pen = new Pen(refreshing ? Art.Mint : Art.Muted, 1.4f))
             { g.DrawArc(pen, 286, 23, 12, 12, 25, 285); g.DrawLines(pen, new[] { new PointF(297, 20), new PointF(299, 25), new PointF(294, 25) }); }
@@ -206,9 +206,11 @@ namespace ProxyDeck
             Art.Label(g, "CLIProxy", 42, 109, 88, 11.5f, Art.Text, false, false);
             Art.Label(g, view.ProxyReady ? "ready" : "off", 108, 111, 48, 10, Art.Muted, false, true);
             using (var pen = new Pen(Art.Edge)) g.DrawLine(pen, 176, 107, 176, 126);
+            if (hover == "tailscale") Art.Box(g, new RectangleF(183, 104, 152, 28), Color.FromArgb(29, 35, 42), 6, false);
             Dot(g, 192, 116, view.NetworkReady ? Art.Mint : Art.Muted, 5);
-            Art.Label(g, "Tailscale", 205, 109, 77, 11.5f, Art.Text, false, false);
-            Art.Label(g, !SettingsStore.Current.UseTailscale ? "Optional" : view.NetworkReady ? "connected" : "off", 271, 111, 60, 9, Art.Muted, false, true);
+            Art.Label(g, "Tailscale", 205, 109, 65, 11.5f, Art.Text, false, false);
+            DrawSwitch(g, "tailscale", SettingsStore.Current.UseTailscale, 299, 111);
+            hits["tailscale"] = new RectangleF(183, 103, 152, 30);
             Art.Label(g, "ACCOUNTS", 19, 152, 140, 9, Art.Muted, true, false);
             Art.Label(g, view.Accounts.Count + (view.Accounts.Count == 1 ? " account" : " accounts"), 222, 151, 120, 10, Art.Muted, false, true);
 
@@ -232,11 +234,12 @@ namespace ProxyDeck
 
             float footer = height - Footer + 3;
             bool hasError = !String.IsNullOrWhiteSpace(view.Error);
-            Art.Box(g, new RectangleF(16, footer, 328, 31), hasError ? Color.FromArgb(39, 26, 29) : Color.FromArgb(17, 29, 27), 8, false);
-            Dot(g, 29, footer + 13, hasError ? Art.Amber : view.Desired && view.Warmup ? Art.Mint : Art.Muted, 4);
-            string warmText = hasError ? view.Error : view.Desired ? "Auto Warm after reset" : "Warmup and remote access stopped";
-            Art.Label(g, warmText, 41, footer + 7, hasError ? 285 : 246, hasError ? 9.5f : 10.5f, hasError ? Art.Amber : Art.Muted, false, false);
-            if (!hasError && view.Desired) Art.Label(g, view.Warmup ? "On" : "off", 280, footer + 7, 48, 10.5f, view.Warmup ? Art.Mint : Art.Muted, true, true);
+            Art.Box(g, new RectangleF(16, footer, 328, 31), Hovered("warmup", Color.FromArgb(17, 29, 27), Color.FromArgb(23, 42, 36)), 8, false);
+            bool warmup = view.ProxyReady ? view.Warmup : SettingsStore.Current.AutoWarm;
+            Dot(g, 29, footer + 13, view.Desired && warmup ? Art.Mint : Art.Muted, 4);
+            Art.Label(g, "Auto Warm after reset", 41, footer + 7, 218, 10.5f, Art.Muted, false, false);
+            DrawSwitch(g, "warmup", warmup, 299, footer + 7);
+            hits["warmup"] = new RectangleF(16, footer, 328, 31);
             DrawButton(g, "panel", "Quota dashboard", 16, footer + 42, 159, false);
             DrawButton(g, "key", "Copy management key", 185, footer + 42, 159, false);
             DrawButton(g, "power", view.Busy ? view.Stage + "…" : view.Desired ? "Stop system" : "Start system", 16, footer + 88, 328, view.Desired);
@@ -248,7 +251,8 @@ namespace ProxyDeck
                 if (!view.Desired) age = "System stopped · last known limits";
             }
             if (toastUntil > DateTimeOffset.Now) age = toast;
-            Art.Label(g, age, 18, footer + 136, 305, 9, Art.Muted, false, false);
+            else if (hasError) age = view.Error;
+            Art.Label(g, age, 18, footer + 136, 285, 9, hasError ? Art.Amber : Art.Muted, false, false);
             Art.Label(g, "•••", 312, footer + 129, 29, 15, Art.Muted, true, true); Hit("menu", 310, footer + 127, 34, 28);
         }
         protected override void OnMouseMove(MouseEventArgs e)
@@ -256,14 +260,26 @@ namespace ProxyDeck
             base.OnMouseMove(e); var point = new PointF(e.X / zoom, e.Y / zoom);
             string next = hits.FirstOrDefault(hit => hit.Value.Contains(point)).Key ?? "";
             Cursor = next.Length > 0 ? Cursors.Hand : Cursors.Default;
-            if (next != hover) { hover = next; Invalidate(); }
+            if (next != hover)
+            {
+                hover = next;
+                string hint = next == "warmup" ? "Click to turn Auto Warm on or off. Changes are saved immediately." :
+                    next == "tailscale" ? SettingsStore.Current.ExclusiveTailscale ? "Click to start or stop Tailscale. The local proxy stays running." :
+                    "Click to enable or disable this app's phone access. Other Tailscale connections stay running." : controller.View.Error;
+                tips.SetToolTip(this, hint); Invalidate();
+            }
         }
         protected override void OnMouseLeave(EventArgs e) { hover = ""; Invalidate(); base.OnMouseLeave(e); }
         protected override void OnMouseWheel(MouseEventArgs e) { scroll -= e.Delta / 3f; Invalidate(); base.OnMouseWheel(e); }
         protected override async void OnMouseUp(MouseEventArgs e)
         {
-            base.OnMouseUp(e); var point = new PointF(e.X / zoom, e.Y / zoom);
+            base.OnMouseUp(e); if (e.Button != MouseButtons.Left) return;
+            var point = new PointF(e.X / zoom, e.Y / zoom);
             string id = hits.FirstOrDefault(hit => hit.Value.Contains(point)).Key;
+            await ActivateAsync(id);
+        }
+        internal async System.Threading.Tasks.Task ActivateAsync(string id)
+        {
             try
             {
                 if (id == "hide") Hide();
@@ -271,7 +287,23 @@ namespace ProxyDeck
                 else if (id == "key") CopyKey();
                 else if (id == "menu" && ContextRequested != null) ContextRequested();
                 else if (id == "power" && !controller.View.Busy) { if (controller.View.Desired) await controller.StopAsync(); else await controller.StartAsync(); }
-                else if (id == "refresh" && !refreshing && controller.View.Desired)
+                else if (id == "warmup" && !controller.View.Busy)
+                {
+                    await controller.SetWarmupAsync(!controller.View.Warmup);
+                    Toast(controller.View.Warmup ? "Auto Warm is on." : "Auto Warm is off.");
+                }
+                else if (id == "tailscale" && !controller.View.Busy)
+                {
+                    if (!SettingsStore.Current.UseTailscale && !controller.TailscaleConfigured)
+                    {
+                        if (TailscaleSetupRequested != null) TailscaleSetupRequested();
+                        else Toast("Enable Tailscale in Setup & components first.");
+                        return;
+                    }
+                    await controller.SetTailscaleAsync(!SettingsStore.Current.UseTailscale);
+                    Toast(SettingsStore.Current.UseTailscale ? "Tailscale access is on." : "Tailscale access is off.");
+                }
+                else if (id == "refresh" && !refreshing && !controller.View.Busy && controller.View.Desired)
                 {
                     refreshing = true; Invalidate(); controller.AllowAuthRetry();
                     await controller.RefreshAsync(true, true); refreshing = false; Invalidate();
@@ -279,6 +311,7 @@ namespace ProxyDeck
             }
             catch (Exception error) { refreshing = false; Toast(Controller.Friendly(error)); }
         }
+        protected override void Dispose(bool disposing) { if (disposing) tips.Dispose(); base.Dispose(disposing); }
         internal void ExportImage(string path)
         {
             SetSizeAndPosition(); CreateControl();

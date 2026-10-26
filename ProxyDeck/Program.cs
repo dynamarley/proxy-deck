@@ -34,7 +34,7 @@ namespace ProxyDeck
         readonly EventWaitHandle showEvent;
         readonly EventWaitHandle exitEvent;
         Icon currentIcon;
-        bool exiting, polling, configuring;
+        bool exiting, polling, configuring, iconActive = true;
         DateTimeOffset lastPoll = DateTimeOffset.MinValue;
         internal DeckContext(EventWaitHandle signal, EventWaitHandle exitSignal)
         {
@@ -54,10 +54,11 @@ namespace ProxyDeck
             AddAsync("Sign in to Tailscale…", async () => { try { await controller.LoginTailscaleAsync(); } catch (Exception error) { MessageBox.Show(Controller.Friendly(error), "Tailscale"); } });
             menu.Items.Add(new ToolStripSeparator());
             AddAsync("Exit and stop system", Quit);
-            currentIcon = Art.Icon(null, true);
+            currentIcon = Art.Icon(true);
             tray = new NotifyIcon { Icon = currentIcon, Text = "Proxy Deck · starting", Visible = true, ContextMenuStrip = menu };
             tray.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) { if (form.Visible) form.Hide(); else { form.ShowPanel(); lastPoll = DateTimeOffset.MinValue; } } };
             form.ContextRequested += () => menu.Show(Cursor.Position);
+            form.TailscaleSetupRequested += async () => await Configure(true);
             controller.Changed += Update;
             form.Shown += async (s, e) => { await controller.StartAsync(); lastPoll = DateTimeOffset.Now; };
             timer = new System.Windows.Forms.Timer { Interval = 1000 };
@@ -78,8 +79,11 @@ namespace ProxyDeck
             if (form.InvokeRequired) { form.BeginInvoke(new Action(Update)); return; }
             form.UpdateView();
             var usable = controller.View.Accounts.Where(a => a.Short.Known).ToArray();
-            int? percent = controller.View.Ready && usable.Length > 0 ? (int?)Math.Floor(usable.Max(a => a.Short.Remaining)) : null;
-            Icon next = Art.Icon(percent, controller.View.Desired); tray.Icon = next; currentIcon.Dispose(); currentIcon = next;
+            if (iconActive != controller.View.Desired)
+            {
+                iconActive = controller.View.Desired;
+                Icon next = Art.Icon(iconActive); tray.Icon = next; currentIcon.Dispose(); currentIcon = next;
+            }
             string label = controller.View.Desired ? "Proxy Deck" : "Proxy Deck · stopped";
             if (controller.View.Desired && usable.Length > 0) label += " · " + String.Join(" / ", usable.Select(a => (int)a.Short.Remaining + "%"));
             tray.Text = label.Length > 63 ? label.Substring(0, 63) : label;
@@ -101,11 +105,12 @@ namespace ProxyDeck
             }
             finally { polling = false; }
         }
-        Task Configure()
+        Task Configure() { return Configure(false); }
+        Task Configure(bool enableTailscale)
         {
             if (configuring || controller.View.Busy || polling) return Task.FromResult(0);
             configuring = true; form.Hide();
-            try { using (var setup = new SetupForm(controller)) setup.ShowDialog(); }
+            try { using (var setup = new SetupForm(controller, enableTailscale)) setup.ShowDialog(); }
             finally { configuring = false; form.ShowPanel(); }
             return Task.FromResult(0);
         }
@@ -196,7 +201,7 @@ namespace ProxyDeck
                 }
                 return 0;
             }
-            if (args[0] == "--make-icon") { using (var icon = Art.Icon(null, true)) using (var file = File.Create(output)) icon.Save(file); return 0; }
+            if (args[0] == "--make-icon") { using (var icon = Art.Icon(true)) using (var file = File.Create(output)) icon.Save(file); return 0; }
             if (args[0] == "--self-test")
             {
                 var fixture = Json.Parse("{\"accounts\":[{\"auth_id\":\"a\",\"available\":true,\"five_hour\":{\"remaining_percent\":62,\"reset_at\":\"2026-10-27T02:00:00+03:00\"},\"long_window\":{\"remaining_percent\":48,\"kind\":\"weekly\"}},{\"auth_id\":\"b\",\"available\":false,\"five_hour\":{\"remaining_percent\":0},\"long_window\":{\"missing\":true}},{\"auth_id\":\"c\",\"five_hour\":{\"missing\":true},\"long_window\":{\"remaining_percent\":100}}]}");

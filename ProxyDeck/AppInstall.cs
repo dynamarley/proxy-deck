@@ -30,7 +30,7 @@ namespace ProxyDeck
                 using (var resource = System.Reflection.Assembly.GetExecutingAssembly().GetManifestResourceStream("ProxyDeck." + document))
                 using (var reader = new StreamReader(resource)) File.WriteAllText(Path.Combine(SettingsStore.DataRoot, document), reader.ReadToEnd(), new System.Text.UTF8Encoding(true));
             string iconPath = Path.Combine(SettingsStore.DataRoot, "ProxyDeck.ico");
-            using (var icon = Art.Icon(null, true)) using (var file = File.Create(iconPath)) icon.Save(file);
+            using (var icon = Art.Icon(true)) using (var file = File.Create(iconPath)) icon.Save(file);
             // COM shortcut creation keeps installation per-user without PowerShell execution policy.
             Type shellType = Type.GetTypeFromProgID("WScript.Shell");
             dynamic shell = Activator.CreateInstance(shellType);

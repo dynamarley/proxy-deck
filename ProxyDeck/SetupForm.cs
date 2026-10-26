@@ -22,7 +22,7 @@ namespace ProxyDeck
         CancellationTokenSource cancellation;
         int page;
         bool busy, installed;
-        internal SetupForm(Controller model)
+        internal SetupForm(Controller model, bool enableTailscale = false)
         {
             controller = model; options = SettingsStore.Current.Copy();
             Text = "Proxy Deck · Setup & components"; BackColor = Art.Back; ForeColor = Art.Text;
@@ -40,7 +40,7 @@ namespace ProxyDeck
             directory.Text = options.ProxyDirectory; key.UseSystemPasswordChar = true; key.AccessibleName = "Existing CLIProxy management key";
             port.Minimum = 1024; port.Maximum = 65535; port.Value = options.Port;
             delay.Minimum = 1; delay.Maximum = 15; delay.Value = options.ResetDelaySeconds / 60;
-            remote.Checked = options.UseTailscale; warm.Checked = options.AutoWarm; exclusive.Checked = options.ExclusiveTailscale; manage.Checked = options.ManageExistingProxy;
+            remote.Checked = options.UseTailscale || enableTailscale; warm.Checked = options.AutoWarm; exclusive.Checked = options.ExclusiveTailscale; manage.Checked = options.ManageExistingProxy;
             remote.CheckedChanged += (s, e) => exclusive.Enabled = remote.Checked;
             FormClosing += (s, e) => { if (busy) { e.Cancel = true; cancellation.Cancel(); feedback.Text = "Canceling the download; waiting for the current setup step to finish…"; } };
             Render();
