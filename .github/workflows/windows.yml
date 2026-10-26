@@ -39,6 +39,7 @@ jobs:
     permissions:
       contents: write
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           name: ProxyDeck-Windows-x64
@@ -49,4 +50,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
-        run: gh release create "$env:RELEASE_TAG" ./artifacts/* --verify-tag --generate-notes
+        run: |
+          $notes = ".github/release-notes/$env:RELEASE_TAG.md"
+          if (Test-Path -LiteralPath $notes) {
+            gh release create "$env:RELEASE_TAG" ./artifacts/* --verify-tag --title "Proxy Deck $env:RELEASE_TAG" --notes-file "$notes"
+          } else {
+            gh release create "$env:RELEASE_TAG" ./artifacts/* --verify-tag --title "Proxy Deck $env:RELEASE_TAG" --generate-notes
+          }
+          if ($LASTEXITCODE -ne 0) { throw 'Release publication failed' }

@@ -7,7 +7,11 @@ not start automatically with Windows.
 
 ## Installation
 
-1. Download **`ProxyDeck-Setup.exe`** from this repository's **Releases** page and
+[Download Windows installer](https://github.com/dynamarley/proxy-deck/releases/latest/download/ProxyDeck-Setup.exe)
+| [Download ZIP](https://github.com/dynamarley/proxy-deck/releases/latest/download/ProxyDeck-Windows-x64.zip)
+| [All releases](https://github.com/dynamarley/proxy-deck/releases)
+
+1. Download **`ProxyDeck-Setup.exe`** using the installer link above and
    open it. If you download the ZIP, extract the entire archive first.
 2. Choose a CLIProxy folder. If CLIProxy is missing, the wizard installs it. For
    an existing setup, select the folder containing `cli-proxy-api.exe` and
