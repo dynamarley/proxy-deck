@@ -14,6 +14,44 @@ namespace ProxyDeck
 {
     internal static class Verification
     {
+        // A separate tailnet cannot be provisioned in CI. Exercise the real controller
+        // and settings persistence with a stateful Tailscale boundary, never the host service.
+        sealed class TestNetwork
+        {
+            internal bool Owned, ForeignRoot, FailRemove, FailStart, Running = true;
+            internal int Stops, PendingStatuses;
+            internal readonly List<string> Commands = new List<string>();
+            internal Task Service(bool running)
+            {
+                if (running && FailStart) throw new InvalidOperationException("Simulated service start failure.");
+                Running = running; if (!running) Stops++;
+                return Task.FromResult(0);
+            }
+            internal Task<string> Run(string exe, string args, int timeout)
+            {
+                Commands.Add(args);
+                if (args == "status --json")
+                {
+                    string state = PendingStatuses > 0 ? "Starting" : Running ? "Running" : "Stopped";
+                    if (PendingStatuses > 0) PendingStatuses--;
+                    return Task.FromResult("{\"BackendState\":\"" + state + "\",\"Self\":{\"DNSName\":\"test-node.example.ts.net.\"}}");
+                }
+                if (args == "serve status --json")
+                {
+                    var handlers = new Dictionary<string, object> { { "/other", new { Proxy = "http://127.0.0.1:9999" } } };
+                    if (Owned || ForeignRoot) handlers["/"] = new { Proxy = ForeignRoot ? "http://127.0.0.1:9998" : Paths.Api };
+                    var web = new Dictionary<string, object> { { "test-node.example.ts.net:" + SettingsStore.Current.Port, new { Handlers = handlers } } };
+                    return Task.FromResult(new JavaScriptSerializer().Serialize(new { Web = web }));
+                }
+                if (args.EndsWith(" --set-path=/ off", StringComparison.Ordinal))
+                {
+                    if (FailRemove) throw new InvalidOperationException("Simulated Serve update failure.");
+                    Owned = false; return Task.FromResult("");
+                }
+                if (args == "serve --bg --yes --https=" + SettingsStore.Current.Port + " " + Paths.Api) { Owned = true; return Task.FromResult(""); }
+                throw new InvalidOperationException("Unexpected Tailscale command in verification.");
+            }
+        }
         static void Check(bool result, string scenario, List<string> passed)
         { if (!result) throw new InvalidOperationException("Verification failed: " + scenario); passed.Add(scenario); }
         internal static async Task<int> Run(string output, bool integration)
@@ -68,20 +106,50 @@ namespace ProxyDeck
                     await Provisioner.InstallAsync(options, s => { }, CancellationToken.None);
                     SettingsStore.Save(options);
                     Check(File.Exists(Path.Combine(options.ProxyDirectory, "cli-proxy-api.exe")), "official CLIProxy download verified and installed in a Unicode path", passed);
-                    controller = new Controller(); await controller.StartAsync();
+                    var network = new TestNetwork();
+                    controller = new Controller(network.Run, network.Service); await controller.StartAsync();
                     Check(controller.View.Ready && controller.View.Error.Length == 0 && controller.View.Accounts.Count == 0, "clean local proxy starts without Tailscale or logged-in accounts", passed);
                     using (var client = new HttpClient(new HttpClientHandler { UseProxy = false }))
                     {
                         client.DefaultRequestHeaders.Authorization = new System.Net.Http.Headers.AuthenticationHeaderValue("Bearer", controller.ManagementKey());
                         var settings = Json.Parse(await client.GetStringAsync(Paths.Api + Paths.Fleet + "/settings"));
                         Check(!Json.Bool(settings, "enable_reset_probe") && !Json.Bool(settings, "handle_enabled") && !Json.Bool(settings, "retry_enabled"), "actual Fleet settings keep warmup and routing disabled", passed);
-                        options.AutoWarm = true; options.ApplyFleetSettings = true; await controller.ApplyFleetSettingsAsync();
+                        await controller.SetWarmupAsync(true);
                         settings = Json.Parse(await client.GetStringAsync(Paths.Api + Paths.Fleet + "/settings"));
                         Check(Json.Bool(settings, "enable_reset_probe") && Json.Str(settings, "refresh_after_reset_delay") == "1m0s" && !Json.Bool(settings, "probe_on_provisional_roster"), "opt-in warmup applies recommended reset delay through the actual API", passed);
-                        options.AutoWarm = false; options.ApplyFleetSettings = true; await controller.ApplyFleetSettingsAsync();
+                        Check(controller.View.Warmup && SettingsStore.Load().AutoWarm, "Auto Warm toggle persists its confirmed enabled state", passed);
+                        var valid = SettingsStore.Current.Copy(); var invalid = valid.Copy(); invalid.ProtectedManagementKey = SettingsStore.Protect(SettingsStore.NewKey()); SettingsStore.Save(invalid);
+                        rejected = false;
+                        try { await controller.SetWarmupAsync(false); } catch (AuthException) { rejected = true; }
+                        Check(rejected && controller.View.Warmup && SettingsStore.Load().AutoWarm && !controller.View.Busy, "failed Auto Warm request does not persist a false off state or leave controls busy", passed);
+                        SettingsStore.Save(valid); controller.AllowAuthRetry();
+                        await controller.SetWarmupAsync(false);
                         settings = Json.Parse(await client.GetStringAsync(Paths.Api + Paths.Fleet + "/settings"));
-                        Check(!Json.Bool(settings, "enable_reset_probe"), "warmup can be disabled again", passed);
+                        Check(!Json.Bool(settings, "enable_reset_probe") && !SettingsStore.Load().AutoWarm, "warmup can be disabled and the choice survives settings reload", passed);
+                        int proxyId = Controller.MatchingProcesses(Paths.ProxyExe).Select(process => { int id = process.Id; process.Dispose(); return id; }).Single();
+                        network.PendingStatuses = 2; await controller.SetTailscaleAsync(true);
+                        Check(SettingsStore.Load().UseTailscale && controller.View.NetworkReady && network.Owned && network.PendingStatuses == 0, "Tailscale toggle waits for backend startup before confirming phone access", passed);
+                        await controller.SetTailscaleAsync(false);
+                        Check(!SettingsStore.Load().UseTailscale && !network.Owned && network.Stops == 0 && network.Running, "shared Tailscale toggle removes only app access and leaves the service running", passed);
+                        options = SettingsStore.Current; options.ExclusiveTailscale = true; SettingsStore.Save(options);
+                        await controller.SetTailscaleAsync(true); await controller.SetTailscaleAsync(false);
+                        Check(network.Stops == 1 && !network.Running && SettingsStore.Load().ExclusiveTailscale, "exclusive Tailscale toggle stops the service and preserves the on-demand preference", passed);
+                        options = SettingsStore.Current; options.ExclusiveTailscale = false; SettingsStore.Save(options);
+                        await controller.SetTailscaleAsync(true); network.FailRemove = true; rejected = false;
+                        try { await controller.SetTailscaleAsync(false); } catch (InvalidOperationException) { rejected = true; }
+                        Check(rejected && SettingsStore.Load().UseTailscale && network.Owned && !controller.View.Busy, "failed Tailscale disable does not claim or persist that access is off", passed);
+                        network.FailRemove = false; await controller.SetTailscaleAsync(false);
+                        network.FailStart = true; rejected = false;
+                        try { await controller.SetTailscaleAsync(true); } catch (InvalidOperationException) { rejected = true; }
+                        Check(rejected && !SettingsStore.Load().UseTailscale && !controller.View.Busy, "failed Tailscale enable preserves the previous disabled preference", passed);
+                        network.FailStart = false; network.ForeignRoot = true; rejected = false;
+                        try { await controller.SetTailscaleAsync(true); } catch (NetworkSetupException) { rejected = true; }
+                        Check(rejected && network.ForeignRoot && !network.Owned && !SettingsStore.Load().UseTailscale, "Tailscale enable refuses to replace another app's root handler", passed);
+                        network.ForeignRoot = false;
+                        using (var response = await client.GetAsync(Paths.Api + "/")) Check(response.IsSuccessStatusCode && Controller.MatchingProcesses(Paths.ProxyExe).Select(process => { int id = process.Id; process.Dispose(); return id; }).Single() == proxyId, "network toggles keep the same local proxy process and API running", passed);
+                        Check(!network.Commands.Any(value => value.Contains("reset") || value.StartsWith("down", StringComparison.Ordinal)), "network toggles never reset Serve or disconnect the shared tailnet", passed);
                     }
+                    options = SettingsStore.Current;
                     await controller.StopAsync();
                     Check(!Controller.MatchingProcesses(Paths.ProxyExe).Any(), "owned proxy stops cleanly", passed);
                     string config = Path.Combine(options.ProxyDirectory, "config.yaml");

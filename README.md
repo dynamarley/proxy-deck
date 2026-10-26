@@ -101,14 +101,25 @@ guarantee that a new window will start or that additional quota will appear.
 Your account provider's service terms apply.
 
 **Auto Warm and the phone dashboard do not run while the system is stopped.**
-You can enable or disable Auto Warm later under **Setup & components**.
+Click the **Auto Warm** switch in the panel to enable or disable it immediately.
+The confirmed choice is saved for the next launch. You can also configure it
+under **Setup & components**.
 
 ## Daily use
 
 - **Click the tray icon:** See each account's remaining 5-hour and weekly or
   monthly quota, along with reset times.
-- **Tray number:** The highest remaining 5-hour percentage among monitored
-  accounts. It is not a pooled quota. Unknown values appear as `—`.
+- **Tray logo:** A red Proxy Deck logo while the system is enabled, gray when
+  stopped. Hover over it to see remaining 5-hour percentages; open the panel for
+  all limits. Windows may place it in the hidden-icons menu; drag it onto the
+  taskbar if you want it always visible.
+- **Auto Warm switch:** Applies the change through Fleet Manager and saves it
+  after confirmation. CLIProxy must be running.
+- **Tailscale switch:** Turns this app's phone access on or off while keeping
+  the local proxy running. In on-demand mode it also stops the Tailscale service.
+  In shared mode it removes only this app's root Serve handler and leaves other
+  Tailscale connections and paths running. If initial setup is required, the
+  switch opens the setup wizard with Tailscale selected.
 - **Refresh:** Requests a quota check, at most once per minute while the panel
   is open. With the panel hidden, local status is read every 90 seconds. The
   footer shows how old the quota data is.
