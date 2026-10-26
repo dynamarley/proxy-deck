@@ -37,6 +37,16 @@ namespace ProxyDeck
                 rejected = false;
                 try { ConfigEditor.Set("plugins:\n  enabled: false\n  enabled: true\n", new[] { "plugins", "enabled" }, "true"); } catch (InvalidOperationException) { rejected = true; }
                 Check(rejected, "ambiguous duplicate YAML keys rejected", passed);
+                string samePort = "config-version: 8\r\nserver:\r\n  port: 8317 # keep this comment\r\n";
+                Check(Provisioner.ConfigureExistingPort(samePort, 8317) == samePort, "unchanged v8 port preserves inline comments and line endings", passed);
+                string legacy = "port: 8317 # existing API\nplugins:\n  enabled: true\n";
+                Check(Provisioner.ConfigureExistingPort(legacy, 8317) == legacy, "matching legacy port leaves the configuration unchanged", passed);
+                rejected = false;
+                try { Provisioner.ConfigureExistingPort(legacy, 8318); } catch (InvalidOperationException) { rejected = true; }
+                Check(rejected, "legacy port mismatch is rejected before installation changes", passed);
+                rejected = false;
+                try { Provisioner.ConfigureExistingPort("port: {invalid: 8317}\n", 8317); } catch (InvalidOperationException) { rejected = true; }
+                Check(rejected, "unreadable legacy port is rejected without guessing", passed);
                 rejected = false;
                 try { Downloads.SafeEntry(testRoot, "../outside.exe"); } catch (InvalidDataException) { rejected = true; }
                 Check(rejected, "archive traversal blocked", passed);
@@ -77,9 +87,18 @@ namespace ProxyDeck
                     string config = Path.Combine(options.ProxyDirectory, "config.yaml");
                     File.WriteAllText(config, ConfigEditor.Set(File.ReadAllText(config), new[] { "plugins", "enabled" }, "false") + "\n# keep-custom-marker\n");
                     string before = File.ReadAllText(config);
+                    int oldPort = options.Port;
+                    do
+                    {
+                        listener = new TcpListener(IPAddress.Loopback, 0); listener.Start();
+                        options.Port = ((IPEndPoint)listener.LocalEndpoint).Port; listener.Stop();
+                    } while (options.Port == oldPort);
                     await Provisioner.InstallAsync(options, s => { }, CancellationToken.None);
                     Check(File.ReadAllText(config).Contains("# keep-custom-marker") && Directory.GetFiles(options.ProxyDirectory, "config.yaml.proxydeck-*.bak").Length > 0, "reinstall preserves existing configuration and creates a backup", passed);
-                    await controller.StartAsync(); Check(controller.View.Ready, "repaired installation restarts", passed); await controller.StopAsync();
+                    Check(ConfigEditor.Read(File.ReadAllText(config), "server", "port") == options.Port.ToString(), "existing v8 configuration uses the newly selected API port", passed);
+                    Check(Directory.GetFiles(options.ProxyDirectory, "config.yaml.proxydeck-*.bak").Any(file => File.ReadAllText(file) == before), "port change preserves the exact previous configuration in a backup", passed);
+                    SettingsStore.Save(options); controller.ResetConfiguration();
+                    await controller.StartAsync(); Check(controller.View.Ready, "repaired installation restarts on the newly selected API port", passed); await controller.StopAsync();
                 }
             }
             catch (Exception failure) { error = failure.GetType().Name + ": " + Controller.Friendly(failure); }

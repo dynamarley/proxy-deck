@@ -90,6 +90,20 @@ namespace ProxyDeck
     }
     internal static class Provisioner
     {
+        internal static string ConfigureExistingPort(string yaml, int port)
+        {
+            bool version8 = System.Text.RegularExpressions.Regex.IsMatch(yaml, @"(?m)^config-version:[ \t]*8[ \t]*(?:#.*)?\r?$");
+            string raw = ConfigEditor.Read(yaml, version8 ? new[] { "server", "port" } : new[] { "port" });
+            int comment = raw.IndexOf('#');
+            if (comment >= 0) raw = raw.Substring(0, comment);
+            int configured;
+            // A repair with an unchanged port must preserve comments and formatting.
+            if (Int32.TryParse(raw.Trim(), out configured) && configured == port) return yaml;
+            if (version8)
+                return ConfigEditor.Set(yaml, new[] { "server", "port" }, port.ToString(System.Globalization.CultureInfo.InvariantCulture));
+            // Preserve legacy layouts instead of adding a v8 server block they do not use.
+            throw new InvalidOperationException("For legacy CLIProxy configurations, the API port must match config.yaml. Change the port there first, or migrate to the v8 configuration format.");
+        }
         internal static string NewConfig(AppSettings options, string managementKey, string accessKey, string pluginsDirectory)
         {
             Func<string, string> quote = s => new JavaScriptSerializer().Serialize(s);
@@ -141,7 +155,7 @@ namespace ProxyDeck
             else
             {
                 progress("Backing up existing settings");
-                string yaml = File.ReadAllText(config), edited = yaml;
+                string yaml = File.ReadAllText(config), edited = ConfigureExistingPort(yaml, options.Port);
                 originalConfig = yaml;
                 // Require the v8 layout for network edits; legacy layouts need explicit migration.
                 if (options.UseTailscale && !System.Text.RegularExpressions.Regex.IsMatch(yaml, @"(?m)^config-version:[ \t]*8[ \t]*(?:#.*)?\r?$"))

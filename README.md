@@ -17,6 +17,9 @@ not start automatically with Windows.
    an existing setup, select the folder containing `cli-proxy-api.exe` and
    `config.yaml`, then enter its **management key**. This is different from the
    client API key.
+   For CLIProxy v8 configurations, the wizard applies your selected API port and
+   backs up the previous configuration. Legacy configurations must already use
+   the selected port; a mismatch is reported before installation changes.
 3. Optionally enable **Tailscale** and **Auto Warm**. Both are off by default for
    new installations.
 4. Review your choices and select **Install & prepare**.
@@ -155,7 +158,7 @@ account. The script is included in the ZIP and installed app folder.
 
 | Problem | What to check |
 | --- | --- |
-| Port already in use | Close the other proxy launcher or choose a free port. For an existing setup, the wizard's port must match config.yaml. |
+| Port already in use | Close the other proxy launcher or choose a free port. The wizard updates `server.port` in an existing v8 `config.yaml`. For legacy configurations, match the port manually before applying setup. |
 | Management key rejected | Enter the correct management key in the wizard. Automatic authentication retries are paused after a rejection; use Refresh after correcting the key. |
 | No quotas displayed | Connect a Codex account and select Refresh. Check whether CLIProxy account priorities differ. |
 | Tailscale is connected but the phone dashboard fails | Use the same tailnet on your phone. Windows, CLIProxy, and HTTPS/Serve must be running and ready. |
@@ -184,8 +187,10 @@ installs an account-free CLIProxy in a temporary directory on a separate port,
 and verifies local startup, shutdown, and warmup settings through the real API.
 It does not change the live user installation or Tailscale service.
 
-GitHub Actions builds on Windows and runs both verification modes. Pushing a
-`v*` tag creates a GitHub Release after the checks pass. The workflow uses your
+GitHub Actions builds on Windows and runs both verification modes plus the quota
+parser self-test. Existing v8 installation tests also change the API port,
+verify the previous configuration backup, and restart on the selected port.
+Pushing a `v*` tag creates a GitHub Release after the checks pass. The workflow uses your
 repository's address automatically. Update dependency versions and hashes
 together in `ProxyDeck/Dependencies.cs`, then rerun the integration test.
 
