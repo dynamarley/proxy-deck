@@ -87,10 +87,17 @@ third-party sign-in pages may follow their own language preferences.
 
 ## Weekly quota routing
 
-In **Setup & components**, enable **Prefer accounts with the most weekly quota
-remaining** to prefer the usable account with the highest remaining weekly
-percentage. Fleet Manager still skips exhausted or blocked accounts and uses
-its normal tie-breaking rules for equal percentages.
+In **Setup & components**, enable **Prefer weekly quota; keep the active account
+when close**. The current account stays preferred while its weekly quota is
+within **10 percentage points** of the fullest usable account. For example,
+with 43%, 46%, and 41% remaining, using the 46% account down to 42% or 40%
+does not switch accounts. Its 5-hour quota running out or the account becoming
+unavailable releases the preference. A weekly lead **greater than 10 points**
+also permits a switch. The confirmed preference survives app restarts.
+
+Without a usable current account, choose the account with the most weekly
+quota remaining. Fleet Manager still skips exhausted or blocked accounts and
+handles immediate failover between Proxy Deck polls.
 
 Proxy Deck updates Fleet's plugin priorities using the latest cached quotas
 on each poll (30 seconds with the panel open, 90 seconds in the tray). Actual

@@ -87,8 +87,8 @@ namespace ProxyDeck
                 Toggle(warm, "Automatically warm up accounts after quota resets", 274);
                 TextAt("Recommended: check 1 minute after reset; send one tiny request if needed.\nGive all CLIProxy accounts the same priority to monitor them together.\nRequests may use a small amount of quota. The system must be running.", 313, 61, false);
                 Field(delay, 376, 68); var label = TextAt("min after reset · recommended: 1", 379, 24, false); label.Left = 82; label.Width = 440;
-                Toggle(weekly, "Prefer accounts with the most weekly quota remaining", 426);
-                TextAt("Updates Fleet plugin priorities with each quota poll (30–90 seconds).\nUnavailable accounts are skipped. CLIProxy account priorities stay unchanged.\nKeep all Codex accounts at the same CLIProxy priority, normally 0.", 466, 65, false);
+                Toggle(weekly, "Prefer weekly quota; keep the active account when close", 426);
+                TextAt("Within 10 percentage points, keep the active account until its 5-hour\nquota runs out or it becomes unavailable. Updates every 30–90 seconds.\nKeep all Codex accounts at the same CLIProxy priority, normally 0.", 466, 65, false);
                 next.Text = "Review setup";
             }
             else if (page == 2)

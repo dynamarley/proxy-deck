@@ -19,6 +19,7 @@ namespace ProxyDeck
         public bool ManagedInstall;
         public bool AutoWarm;
         public bool PreferWeeklyQuota;
+        public string WeeklyPreferredAccount = "";
         public int ResetDelaySeconds = 60;
         public bool ApplyFleetSettings;
         public string ProtectedManagementKey = "";
