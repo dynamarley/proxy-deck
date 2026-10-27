@@ -14,6 +14,83 @@ namespace ProxyDeck
 {
     internal static class Verification
     {
+        sealed class TestFleet : HttpMessageHandler
+        {
+            internal readonly Dictionary<string, object> Root = Json.Parse("{\"accounts\":[],\"settings\":{\"handle_enabled\":false,\"enable_usage_feedback\":false,\"enable_reset_probe\":true,\"retry_enabled\":false,\"custom_field\":\"preserve\"}}");
+            internal int Patches, Puts;
+            internal bool FailPatch;
+            protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellation)
+            {
+                string path = request.RequestUri.AbsolutePath;
+                object result = Root;
+                if (path.EndsWith("/auth-files")) result = new { files = new object[0] };
+                else if (request.Method.Method == "PATCH")
+                {
+                    if (FailPatch) return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable);
+                    var patch = Json.Parse(await request.Content.ReadAsStringAsync());
+                    if (patch.Count != 2 || !patch.ContainsKey("auth_id") || !patch.ContainsKey("scheduler_priority")) throw new InvalidOperationException("Routing must only patch plugin priority.");
+                    var account = Json.Items(Root["accounts"]).Select(Json.Map).Single(a => Json.Str(a, "auth_id") == Json.Str(patch, "auth_id"));
+                    account["scheduler_priority"] = patch["scheduler_priority"]; Patches++;
+                    result = new { ok = true };
+                }
+                else if (path.EndsWith("/settings"))
+                {
+                    if (request.Method == HttpMethod.Put) { Root["settings"] = Json.Parse(await request.Content.ReadAsStringAsync()); Puts++; }
+                    result = Root["settings"];
+                }
+                return new HttpResponseMessage(HttpStatusCode.OK) { Content = new StringContent(new JavaScriptSerializer().Serialize(result)) };
+            }
+        }
+
+        static Dictionary<string, object> WeeklyAccount(string id, double remaining)
+        {
+            return Json.Parse(new JavaScriptSerializer().Serialize(new { auth_id = id, scheduler_priority = 0, cpa_priority = 0, available = true,
+                alias = "Keep alias", long_window = new { kind = "weekly", remaining_percent = remaining, reset_at = DateTimeOffset.UtcNow.AddDays(3).ToString("o") } }));
+        }
+
+        static async Task VerifyWeeklyRouting(List<string> passed)
+        {
+            var high = WeeklyAccount("high", 97); var low = WeeklyAccount("low", 40); var third = WeeklyAccount("third", 23);
+            // Earlier reset used to outrank remaining percentage in Fleet's default pressure sort.
+            Json.Map(low["long_window"])["reset_at"] = DateTimeOffset.UtcNow.AddHours(1).ToString("o");
+            Check(Controller.WeeklyPriority(high, DateTimeOffset.UtcNow) > Controller.WeeklyPriority(low, DateTimeOffset.UtcNow), "weekly remaining quota outranks an earlier reset", passed);
+            var invalid = WeeklyAccount("invalid", 101);
+            Check(Controller.WeeklyPriority(invalid, DateTimeOffset.UtcNow) == 0, "invalid quota is never treated as full", passed);
+            Json.Map(invalid["long_window"])["remaining_percent"] = "NaN";
+            Check(Controller.WeeklyPriority(invalid, DateTimeOffset.UtcNow) == 0, "non-finite quota cannot corrupt routing", passed);
+            invalid = WeeklyAccount("invalid", 100); Json.Map(invalid["long_window"])["reset_at"] = DateTimeOffset.UtcNow.AddMinutes(-1).ToString("o");
+            Check(Controller.WeeklyPriority(invalid, DateTimeOffset.UtcNow) == 0, "expired quota waits for fresh evidence", passed);
+            invalid = WeeklyAccount("invalid", 100); Json.Map(invalid["long_window"])["kind"] = "monthly";
+            Check(Controller.WeeklyPriority(invalid, DateTimeOffset.UtcNow) == 0, "monthly windows are not mislabeled as weekly", passed);
+            var fake = new TestFleet(); fake.Root["accounts"] = new object[] { high, low, third };
+            SettingsStore.Current.PreferWeeklyQuota = true;
+            using (var model = new Controller(handler: fake))
+            {
+                await model.RefreshAsync(false, false);
+                var settings = Json.Map(fake.Root["settings"]);
+                Check(model.View.Error.Length == 0 && fake.Patches == 3 && fake.Puts == 1 && Json.Bool(settings, "handle_enabled"), "quota poll patches every account before enabling Fleet routing", passed);
+                Check(Json.Bool(settings, "enable_reset_probe") && !Json.Bool(settings, "retry_enabled") && Json.Str(settings, "custom_field") == "preserve" && Json.Str(high, "alias") == "Keep alias" && Json.Str(high, "cpa_priority") == "0", "routing preserves warmup, retries, account metadata and CPA priority", passed);
+                await model.RefreshAsync(false, false);
+                Check(fake.Patches == 3 && fake.Puts == 1, "unchanged quota polling performs no writes", passed);
+                Json.Map(high["long_window"])["remaining_percent"] = 30;
+                await model.RefreshAsync(false, false);
+                Check(fake.Patches == 4 && Convert.ToInt32(low["scheduler_priority"]) > Convert.ToInt32(high["scheduler_priority"]), "quota changes automatically switch priority to the fuller account", passed);
+                Json.Map(low["long_window"])["remaining_percent"] = 10;
+                await model.RefreshAsync(false, false, false);
+                Check(fake.Patches == 4, "diagnostic quota reads never update routing", passed);
+                SettingsStore.Current.PreferWeeklyQuota = false;
+                await model.RefreshAsync(false, false);
+                Check(fake.Patches == 4, "routing opt-out stops automatic priority updates", passed);
+                await model.ApplyFleetSettingsAsync();
+                Check(!Json.Bool(Json.Map(fake.Root["settings"]), "handle_enabled"), "applying routing opt-out disables the Fleet scheduler", passed);
+                SettingsStore.Current.PreferWeeklyQuota = true;
+                fake.FailPatch = true;
+                await model.RefreshAsync(false, false);
+                Check(model.View.Error.Length > 0 && !Json.Bool(Json.Map(fake.Root["settings"]), "handle_enabled"), "failed priority writes do not enable routing with incomplete priorities", passed);
+            }
+            SettingsStore.Current.PreferWeeklyQuota = false;
+        }
+
         // A separate tailnet cannot be provisioned in CI. Exercise the real controller
         // and settings persistence with a stateful Tailscale boundary, never the host service.
         sealed class TestNetwork
@@ -91,6 +168,8 @@ namespace ProxyDeck
                 string secret = SettingsStore.NewKey(), protectedKey = SettingsStore.Protect(secret);
                 Check(protectedKey != secret && SettingsStore.Unprotect(protectedKey) == secret, "management key encrypted with per-user DPAPI", passed);
                 var options = SettingsStore.Current;
+                options.ProtectedManagementKey = protectedKey;
+                await VerifyWeeklyRouting(passed);
                 SettingsStore.Save(options); Check(!SettingsStore.Load().UseTailscale && !SettingsStore.Load().AutoWarm, "fresh installation defaults to local mode and no warmup", passed);
                 string generated = Provisioner.NewConfig(options, secret, SettingsStore.NewKey(), Path.Combine(options.ProxyDirectory, "plugins"));
                 Check(generated.Contains("allow-remote: false") && generated.Contains("enable_reset_probe: false") && generated.Contains("handle_enabled: false"), "new proxy starts loopback-only with passive Fleet settings", passed);

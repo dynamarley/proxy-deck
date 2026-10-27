@@ -47,7 +47,7 @@ organization's device policies may restrict installation.
 | Component | Purpose | Installation behavior |
 | --- | --- | --- |
 | [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI) | Exposes your accounts through a local, OpenAI-compatible API | Downloads the verified `8.0.44` Windows package if missing; does not automatically replace an existing executable |
-| [Codex Fleet Manager](https://github.com/doer-ee/cpa-plugin-codex-fleet-manager) | Reads remaining quotas and reset times | Installs the verified `0.4.3` plugin; account routing and model retries stay disabled |
+| [Codex Fleet Manager](https://github.com/doer-ee/cpa-plugin-codex-fleet-manager) | Reads remaining quotas and reset times | Installs the verified `0.4.3` plugin; optional weekly quota routing; model retries stay disabled |
 | [Tailscale](https://tailscale.com/download/windows) | Private access to your dashboard from your phone | Installs or uses an existing installation only when selected |
 | Auto Warm | Activates a new quota window with a small request when needed after reset | An optional Fleet Manager feature; no separate Windows scheduled task |
 
@@ -85,18 +85,38 @@ session. If you previously selected another language in that third-party
 dashboard, use its language selector to switch back to English. Windows and
 third-party sign-in pages may follow their own language preferences.
 
+## Weekly quota routing
+
+In **Setup & components**, enable **Prefer accounts with the most weekly quota
+remaining** to prefer the usable account with the highest remaining weekly
+percentage. Fleet Manager still skips exhausted or blocked accounts and uses
+its normal tie-breaking rules for equal percentages.
+
+Proxy Deck updates Fleet's plugin priorities using the latest cached quotas
+on each poll (30 seconds with the panel open, 90 seconds in the tray). Actual
+quota freshness follows Fleet Manager's refresh schedule; this is not a live
+upstream quota reading for every request. Unknown, invalid, expired and monthly
+windows receive no weekly preference. With no safe selection, Fleet allows
+CLIProxy's normal fallback.
+
+Keep every Codex account at the same **CLIProxy account priority** (normally
+`0`) so routing and Auto Warm can see them all. This option manages only
+**Fleet plugin priorities**, replacing manual plugin pins while enabled.
+Disabling it through Setup turns off Fleet routing; the last plugin priority
+values remain stored. Automatic updates run only while Proxy Deck is open.
+
 ## Auto Warm recommendations
 
 The recommended settings are **check 1 minute after reset**, probing on
-unconfirmed rosters disabled, account routing disabled, and model retries
+unconfirmed rosters disabled, and model retries
 disabled. Fleet Manager reads the actual quota first. If needed, it sends one
 small Codex request and verifies the result. It does not unconditionally send
 requests to every account at fixed times.
 
 To monitor all accounts together, give them the same CLIProxy account priority
 (`0` is recommended). Fleet Manager monitors the highest confirmed priority
-tier when priorities differ. Proxy Deck does not change account priorities
-automatically. Warmup requests can use a small amount of quota and do not
+tier when priorities differ. Proxy Deck does not change CLIProxy account
+priorities automatically. Warmup requests can use a small amount of quota and do not
 guarantee that a new window will start or that additional quota will appear.
 Your account provider's service terms apply.
 
@@ -123,8 +143,11 @@ under **Setup & components**.
 - **Refresh:** Requests a quota check, at most once per minute while the panel
   is open. With the panel hidden, local status is read every 90 seconds. The
   footer shows how old the quota data is.
-- **Quota dashboard:** Opens Fleet Manager's detailed dashboard. Use
+- **Quota dashboard:** Opens Fleet Manager's detailed quota dashboard. Use
   **Copy management key** if it asks for authentication.
+- **CLIProxy dashboard:** Opens CLIProxy's management panel at the configured
+  local port. Available in the panel and the tray menu. Sign in with your
+  management key when prompted; the key is never included in the URL.
 - **Connect Codex account:** Adds an account through your browser.
 - **Stop system:** Stops the managed proxy while leaving the tray app ready.
 - **Exit and stop system:** Stops managed components and exits the tray app.

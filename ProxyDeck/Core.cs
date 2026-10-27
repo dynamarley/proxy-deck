@@ -111,10 +111,10 @@ namespace ProxyDeck
         bool proxyStartedHere;
         bool authBlocked;
         DateTimeOffset lastNetworkCheck = DateTimeOffset.MinValue, lastQuotaRefresh = DateTimeOffset.MinValue;
-        internal Controller(Func<string, string, int, Task<string>> execute = null, Func<bool, Task> service = null)
+        internal Controller(Func<string, string, int, Task<string>> execute = null, Func<bool, Task> service = null, HttpMessageHandler handler = null)
         {
             command = execute ?? Run; networkService = service ?? SetNetworkService;
-            http = new HttpClient(new HttpClientHandler { UseProxy = false });
+            http = new HttpClient(handler ?? new HttpClientHandler { UseProxy = false });
             http.Timeout = TimeSpan.FromSeconds(6);
         }
 
@@ -445,7 +445,7 @@ namespace ProxyDeck
             }
         }
 
-        internal async Task RefreshAsync(bool requestFresh, bool checkNetwork)
+        internal async Task RefreshAsync(bool requestFresh, bool checkNetwork, bool updateRouting = true)
         {
             if (!await refresh.WaitAsync(0)) return;
             try
@@ -467,6 +467,8 @@ namespace ProxyDeck
                     }
                 }
                 var root = await Api(Paths.Fleet + "/status?format=json", false);
+                if (updateRouting && SettingsStore.Current.PreferWeeklyQuota && await UpdateWeeklyRoutingAsync(root))
+                    root = await Api(Paths.Fleet + "/status?format=json", false);
                 View.Accounts = ParseAccounts(root, names);
                 View.Warmup = Json.Bool(Json.Map(Json.Get(root, "settings")), "enable_reset_probe");
                 View.ReadAt = DateTimeOffset.Now; View.ProxyReady = true;
@@ -499,6 +501,7 @@ namespace ProxyDeck
         {
             var settings = await Api(Paths.Fleet + "/settings", false);
             // GET returns a settings payload. Keep every unrelated field intact.
+            // RefreshAsync applies quota priorities before enabling the scheduler.
             settings["handle_enabled"] = false;
             settings["retry_enabled"] = false;
             settings["enable_reset_probe"] = SettingsStore.Current.AutoWarm;
@@ -507,6 +510,47 @@ namespace ProxyDeck
             settings["refresh_after_reset_delay"] = SettingsStore.Current.ResetDelaySeconds + "s";
             await Api(Paths.Fleet + "/settings", HttpMethod.Put, settings);
             SettingsStore.Current.ApplyFleetSettings = false; SettingsStore.Save(SettingsStore.Current);
+        }
+
+        internal static int WeeklyPriority(Dictionary<string, object> account, DateTimeOffset now)
+        {
+            var window = Json.Map(Json.Get(account, "long_window"));
+            double remaining;
+            DateTimeOffset reset;
+            if (Json.Str(window, "kind") != "weekly" || Json.Bool(window, "missing") ||
+                !Double.TryParse(Json.Str(window, "remaining_percent"), NumberStyles.Float, CultureInfo.InvariantCulture, out remaining) ||
+                Double.IsNaN(remaining) || Double.IsInfinity(remaining) || remaining < 0 || remaining > 100 ||
+                !DateTimeOffset.TryParse(Json.Str(window, "reset_at"), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out reset) || reset <= now)
+                return 0;
+            // Fleet still rejects exhausted, blocked and otherwise unusable accounts.
+            // Plugin priorities do not change CPA tiers, so Auto Warm retains the full roster.
+            return 1 + (int)Math.Floor(remaining * 1000);
+        }
+
+        async Task<bool> UpdateWeeklyRoutingAsync(Dictionary<string, object> root)
+        {
+            bool changed = false;
+            var now = DateTimeOffset.UtcNow;
+            foreach (var item in Json.Items(Json.Get(root, "accounts")))
+            {
+                var account = Json.Map(item);
+                string id = Json.Str(account, "auth_id");
+                if (id.Length == 0) continue;
+                int priority = WeeklyPriority(account, now), current;
+                if (Int32.TryParse(Json.Str(account, "scheduler_priority"), out current) && current == priority) continue;
+                await Api(Paths.Fleet + "/annotations/account", new HttpMethod("PATCH"), new { auth_id = id, scheduler_priority = priority });
+                changed = true;
+            }
+            var settings = Json.Map(Json.Get(root, "settings"));
+            if (!Json.Bool(settings, "handle_enabled") || !Json.Bool(settings, "enable_usage_feedback"))
+            {
+                settings = await Api(Paths.Fleet + "/settings", false);
+                settings["handle_enabled"] = true;
+                settings["enable_usage_feedback"] = true;
+                await Api(Paths.Fleet + "/settings", HttpMethod.Put, settings);
+                changed = true;
+            }
+            return changed;
         }
 
         internal async Task AddAccountAsync()

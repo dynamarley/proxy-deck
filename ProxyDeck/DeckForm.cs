@@ -61,7 +61,7 @@ namespace ProxyDeck
 
     internal sealed class DeckForm : Form
     {
-        const float DesignWidth = 360, CardHeight = 144, CardStride = 154, AccountsTop = 172, Footer = 168;
+        const float DesignWidth = 360, CardHeight = 144, CardStride = 154, AccountsTop = 172, Footer = 214;
         readonly Controller controller;
         readonly Dictionary<string, RectangleF> hits = new Dictionary<string, RectangleF>();
         readonly ToolTip tips = new ToolTip { InitialDelay = 350, AutoPopDelay = 10000 };
@@ -108,6 +108,11 @@ namespace ProxyDeck
         {
             if (!controller.View.ProxyReady) { Toast("Start the system first."); return; }
             Controller.Open(Paths.Api + "/v0/resource/plugins/codex-fleet-manager/status");
+        }
+        internal void OpenProxyDashboard()
+        {
+            if (!controller.View.ProxyReady) { Toast("Start the system first."); return; }
+            Controller.Open(Paths.Api + "/management.html");
         }
         internal void CopyKey()
         {
@@ -242,7 +247,8 @@ namespace ProxyDeck
             hits["warmup"] = new RectangleF(16, footer, 328, 31);
             DrawButton(g, "panel", "Quota dashboard", 16, footer + 42, 159, false);
             DrawButton(g, "key", "Copy management key", 185, footer + 42, 159, false);
-            DrawButton(g, "power", view.Busy ? view.Stage + "…" : view.Desired ? "Stop system" : "Start system", 16, footer + 88, 328, view.Desired);
+            DrawButton(g, "proxy-dashboard", "CLIProxy dashboard", 16, footer + 88, 328, false);
+            DrawButton(g, "power", view.Busy ? view.Stage + "…" : view.Desired ? "Stop system" : "Start system", 16, footer + 134, 328, view.Desired);
             string age = "Quota data has not been loaded";
             if (view.ReadAt.HasValue)
             {
@@ -252,8 +258,8 @@ namespace ProxyDeck
             }
             if (toastUntil > DateTimeOffset.Now) age = toast;
             else if (hasError) age = view.Error;
-            Art.Label(g, age, 18, footer + 136, 285, 9, hasError ? Art.Amber : Art.Muted, false, false);
-            Art.Label(g, "•••", 312, footer + 129, 29, 15, Art.Muted, true, true); Hit("menu", 310, footer + 127, 34, 28);
+            Art.Label(g, age, 18, footer + 182, 285, 9, hasError ? Art.Amber : Art.Muted, false, false);
+            Art.Label(g, "•••", 312, footer + 175, 29, 15, Art.Muted, true, true); Hit("menu", 310, footer + 173, 34, 28);
         }
         protected override void OnMouseMove(MouseEventArgs e)
         {
@@ -284,6 +290,7 @@ namespace ProxyDeck
             {
                 if (id == "hide") Hide();
                 else if (id == "panel") OpenPanel();
+                else if (id == "proxy-dashboard") OpenProxyDashboard();
                 else if (id == "key") CopyKey();
                 else if (id == "menu" && ContextRequested != null) ContextRequested();
                 else if (id == "power" && !controller.View.Busy) { if (controller.View.Desired) await controller.StopAsync(); else await controller.StartAsync(); }

@@ -47,6 +47,7 @@ namespace ProxyDeck
             AddAsync("Stop system", () => controller.StopAsync());
             menu.Items.Add(new ToolStripSeparator());
             Add("Open quota dashboard", () => form.OpenPanel());
+            Add("Open CLIProxy dashboard", () => form.OpenProxyDashboard());
             Add("Copy phone link", () => form.CopyRemote());
             Add("Copy management key", () => form.CopyKey());
             Add("Copy client API key", () => { try { Clipboard.SetText(controller.AccessKey()); } catch (Exception error) { MessageBox.Show(Controller.Friendly(error), "Proxy Deck"); } });
@@ -227,7 +228,7 @@ namespace ProxyDeck
                     return stopped && ready ? 0 : 1;
                 }
                 controller.View.Desired = true;
-                await controller.RefreshAsync(false, true);
+                await controller.RefreshAsync(false, true, false);
                 if (args[0] == "--render-preview")
                 {
                     // UI diagnostics must run on the STA thread; no service start or model request.

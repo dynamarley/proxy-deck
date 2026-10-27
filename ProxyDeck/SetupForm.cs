@@ -17,7 +17,7 @@ namespace ProxyDeck
         readonly Button next = new Button(), back = new Button();
         readonly TextBox directory = new TextBox(), key = new TextBox();
         readonly NumericUpDown port = new NumericUpDown(), delay = new NumericUpDown();
-        readonly CheckBox remote = new CheckBox(), warm = new CheckBox(), exclusive = new CheckBox(), manage = new CheckBox();
+        readonly CheckBox remote = new CheckBox(), warm = new CheckBox(), exclusive = new CheckBox(), manage = new CheckBox(), weekly = new CheckBox();
         readonly Label feedback = new Label();
         CancellationTokenSource cancellation;
         int page;
@@ -41,6 +41,7 @@ namespace ProxyDeck
             port.Minimum = 1024; port.Maximum = 65535; port.Value = options.Port;
             delay.Minimum = 1; delay.Maximum = 15; delay.Value = options.ResetDelaySeconds / 60;
             remote.Checked = options.UseTailscale || enableTailscale; warm.Checked = options.AutoWarm; exclusive.Checked = options.ExclusiveTailscale; manage.Checked = options.ManageExistingProxy;
+            weekly.Checked = options.PreferWeeklyQuota;
             remote.CheckedChanged += (s, e) => exclusive.Enabled = remote.Checked;
             FormClosing += (s, e) => { if (busy) { e.Cancel = true; cancellation.Cancel(); feedback.Text = "Canceling the download; waiting for the current setup step to finish…"; } };
             Render();
@@ -78,7 +79,7 @@ namespace ProxyDeck
             {
                 heading.Text = "Choose what you need."; subtitle.Text = "Quota tracking is included. Remote access and Auto Warm are optional.";
                 TextAt("INCLUDED  ·  CLIProxy + Codex Fleet Manager", 0, 28, true);
-                TextAt("Fleet Manager reads account quotas. Proxy Deck keeps account routing\nand model retries disabled.", 34, 45, false);
+                TextAt("Fleet Manager reads account quotas. Quota routing is optional;\nmodel retries stay disabled.", 34, 45, false);
                 Toggle(remote, "Secure phone access with Tailscale", 91);
                 TextAt("Downloads the official installer if needed. Installation and service setup\nrequire administrator approval. Sign-in and Serve may need a browser step.", 133, 45, false);
                 Toggle(exclusive, "Run Tailscale only while Proxy Deck is open", 181); exclusive.Enabled = remote.Checked;
@@ -86,6 +87,8 @@ namespace ProxyDeck
                 Toggle(warm, "Automatically warm up accounts after quota resets", 274);
                 TextAt("Recommended: check 1 minute after reset; send one tiny request if needed.\nGive all CLIProxy accounts the same priority to monitor them together.\nRequests may use a small amount of quota. The system must be running.", 313, 61, false);
                 Field(delay, 376, 68); var label = TextAt("min after reset · recommended: 1", 379, 24, false); label.Left = 82; label.Width = 440;
+                Toggle(weekly, "Prefer accounts with the most weekly quota remaining", 426);
+                TextAt("Updates Fleet plugin priorities with each quota poll (30–90 seconds).\nUnavailable accounts are skipped. CLIProxy account priorities stay unchanged.\nKeep all Codex accounts at the same CLIProxy priority, normally 0.", 466, 65, false);
                 next.Text = "Review setup";
             }
             else if (page == 2)
@@ -96,7 +99,8 @@ namespace ProxyDeck
                 TextAt("Source: github.com/router-for-me/CLIProxyAPI\nCodex Fleet Manager " + Catalog.Fleet.Version + " · quota reader will be installed\nSource: github.com/doer-ee/cpa-plugin-codex-fleet-manager", 44, 76, false);
                 TextAt("Tailscale · " + (remote.Checked ? File.Exists(Paths.Tailscale) ? "using your existing installation" : "official MSI will be installed" : "will not be installed or managed"), 137, 28, true);
                 TextAt("Auto Warm · " + (warm.Checked ? "on, " + delay.Value + " min after reset" : "off"), 176, 28, true);
-                TextAt("Address · http://127.0.0.1:" + port.Value + "\nFolder · " + directory.Text, 220, 56, false);
+                TextAt("Weekly quota routing · " + (weekly.Checked ? "highest remaining first" : "off"), 207, 28, true);
+                TextAt("Address · http://127.0.0.1:" + port.Value + "\nFolder · " + directory.Text, 243, 48, false);
                 TextAt("Your existing config.yaml is backed up before changes. Downloads are\nchecked with SHA-256; the Tailscale publisher signature is verified.\nYou will sign in to your accounts in the browser after installation.", 292, 72, false);
                 next.Text = "Install & prepare";
             }
@@ -153,6 +157,7 @@ namespace ProxyDeck
             options.ProxyDirectory = directory.Text.Trim(); options.Port = (int)port.Value;
             options.UseTailscale = remote.Checked; options.ExclusiveTailscale = remote.Checked && exclusive.Checked;
             options.AutoWarm = warm.Checked; options.ResetDelaySeconds = (int)delay.Value * 60; options.ManageExistingProxy = manage.Checked;
+            options.PreferWeeklyQuota = weekly.Checked;
             if (key.Text.Length > 0) options.ProtectedManagementKey = SettingsStore.Protect(key.Text.Trim());
             page = 3; busy = true; cancellation = new CancellationTokenSource(); Render();
             bool wasRunning = controller.View.Desired;
