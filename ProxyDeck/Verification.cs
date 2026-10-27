@@ -72,23 +72,70 @@ namespace ProxyDeck
                 Check(Json.Bool(settings, "enable_reset_probe") && !Json.Bool(settings, "retry_enabled") && Json.Str(settings, "custom_field") == "preserve" && Json.Str(high, "alias") == "Keep alias" && Json.Str(high, "cpa_priority") == "0", "routing preserves warmup, retries, account metadata and CPA priority", passed);
                 await model.RefreshAsync(false, false);
                 Check(fake.Patches == 3 && fake.Puts == 1, "unchanged quota polling performs no writes", passed);
-                Json.Map(high["long_window"])["remaining_percent"] = 30;
+                Json.Map(high["long_window"])["remaining_percent"] = 29;
                 await model.RefreshAsync(false, false);
-                Check(fake.Patches == 4 && Convert.ToInt32(low["scheduler_priority"]) > Convert.ToInt32(high["scheduler_priority"]), "quota changes automatically switch priority to the fuller account", passed);
+                Check(fake.Patches == 5 && Convert.ToInt32(low["scheduler_priority"]) > Convert.ToInt32(high["scheduler_priority"]), "a lead above ten points switches priority to the fuller account", passed);
+                Check(SettingsStore.Load().WeeklyPreferredAccount == "low", "confirmed active preference survives a settings reload", passed);
                 Json.Map(low["long_window"])["remaining_percent"] = 10;
                 await model.RefreshAsync(false, false, false);
-                Check(fake.Patches == 4, "diagnostic quota reads never update routing", passed);
+                Check(fake.Patches == 5, "diagnostic quota reads never update routing", passed);
                 SettingsStore.Current.PreferWeeklyQuota = false;
                 await model.RefreshAsync(false, false);
-                Check(fake.Patches == 4, "routing opt-out stops automatic priority updates", passed);
+                Check(fake.Patches == 5, "routing opt-out stops automatic priority updates", passed);
                 await model.ApplyFleetSettingsAsync();
                 Check(!Json.Bool(Json.Map(fake.Root["settings"]), "handle_enabled"), "applying routing opt-out disables the Fleet scheduler", passed);
                 SettingsStore.Current.PreferWeeklyQuota = true;
                 fake.FailPatch = true;
                 await model.RefreshAsync(false, false);
                 Check(model.View.Error.Length > 0 && !Json.Bool(Json.Map(fake.Root["settings"]), "handle_enabled"), "failed priority writes do not enable routing with incomplete priorities", passed);
+                Check(SettingsStore.Load().WeeklyPreferredAccount == "low", "failed writes preserve the last confirmed active preference", passed);
             }
             SettingsStore.Current.PreferWeeklyQuota = false;
+        }
+
+        static async Task VerifyStableWeeklyRouting(List<string> passed)
+        {
+            var a = WeeklyAccount("a", 43); var b = WeeklyAccount("b", 46); var c = WeeklyAccount("c", 41);
+            var fake = new TestFleet(); fake.Root["accounts"] = new object[] { a, b, c }; fake.Root["last_selected"] = "b";
+            SettingsStore.Current.PreferWeeklyQuota = true; SettingsStore.Current.WeeklyPreferredAccount = "";
+            using (var model = new Controller(handler: fake))
+            {
+                await model.RefreshAsync(false, false);
+                Check(SettingsStore.Load().WeeklyPreferredAccount == "b" && Convert.ToInt32(b["scheduler_priority"]) == Controller.ActiveWeeklyPriority, "43/46/41 starts on the active 46-percent account", passed);
+                Json.Map(b["long_window"])["remaining_percent"] = 42;
+                await model.RefreshAsync(false, false);
+                Json.Map(b["long_window"])["remaining_percent"] = 40;
+                await model.RefreshAsync(false, false);
+                Check(SettingsStore.Load().WeeklyPreferredAccount == "b" && Convert.ToInt32(b["scheduler_priority"]) > Convert.ToInt32(a["scheduler_priority"]) && fake.Patches == 3, "46 to 42 to 40 does not hop between nearby accounts or rewrite the active pin", passed);
+                Json.Map(b["long_window"])["remaining_percent"] = 33;
+                await model.RefreshAsync(false, false);
+                Check(SettingsStore.Load().WeeklyPreferredAccount == "b", "exactly ten percentage points retains the active account", passed);
+                // Exhaustion must win even when Fleet's availability flag briefly lags.
+                b["five_hour"] = new { remaining_percent = 0, exhausted = true };
+                await model.RefreshAsync(false, false);
+                Check(SettingsStore.Load().WeeklyPreferredAccount == "a" && Convert.ToInt32(a["scheduler_priority"]) == Controller.ActiveWeeklyPriority, "five-hour exhaustion switches to the best usable account", passed);
+                b["five_hour"] = new { remaining_percent = 100 };
+                Json.Map(b["long_window"])["remaining_percent"] = 46;
+                await model.RefreshAsync(false, false);
+                Check(SettingsStore.Load().WeeklyPreferredAccount == "a", "a reset near-equal account does not steal the current account's session", passed);
+            }
+            // A new Controller models restarting the app with the persisted preference.
+            var restarted = new TestFleet(); restarted.Root["accounts"] = new object[] { a, b, c }; restarted.Root["last_selected"] = "b";
+            SettingsStore.Current = SettingsStore.Load();
+            using (var model = new Controller(handler: restarted))
+            {
+                await model.RefreshAsync(false, false);
+                Check(SettingsStore.Load().WeeklyPreferredAccount == "a", "restart retains the confirmed account despite a fuller nearby account", passed);
+                a["available"] = false;
+                await model.RefreshAsync(false, false);
+                Check(SettingsStore.Load().WeeklyPreferredAccount == "b", "an unavailable active account cannot block failover", passed);
+                b["auth_failure"] = true;
+                await model.RefreshAsync(false, false);
+                Check(SettingsStore.Load().WeeklyPreferredAccount == "c", "authentication failure releases the active preference", passed);
+                restarted.Root["accounts"] = new object[0];
+                await model.RefreshAsync(false, false);
+                Check(SettingsStore.Load().WeeklyPreferredAccount == "", "removed accounts release the saved preference", passed);
+            }
         }
 
         // A separate tailnet cannot be provisioned in CI. Exercise the real controller
@@ -167,9 +214,11 @@ namespace ProxyDeck
                 Check(rejected, "archive traversal blocked", passed);
                 string secret = SettingsStore.NewKey(), protectedKey = SettingsStore.Protect(secret);
                 Check(protectedKey != secret && SettingsStore.Unprotect(protectedKey) == secret, "management key encrypted with per-user DPAPI", passed);
-                var options = SettingsStore.Current;
+                var options = SettingsStore.Current.Copy();
                 options.ProtectedManagementKey = protectedKey;
+                SettingsStore.Current = options.Copy();
                 await VerifyWeeklyRouting(passed);
+                await VerifyStableWeeklyRouting(passed);
                 SettingsStore.Save(options); Check(!SettingsStore.Load().UseTailscale && !SettingsStore.Load().AutoWarm, "fresh installation defaults to local mode and no warmup", passed);
                 string generated = Provisioner.NewConfig(options, secret, SettingsStore.NewKey(), Path.Combine(options.ProxyDirectory, "plugins"));
                 Check(generated.Contains("allow-remote: false") && generated.Contains("enable_reset_probe: false") && generated.Contains("handle_enabled: false"), "new proxy starts loopback-only with passive Fleet settings", passed);

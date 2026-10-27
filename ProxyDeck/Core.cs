@@ -527,16 +527,40 @@ namespace ProxyDeck
             return 1 + (int)Math.Floor(remaining * 1000);
         }
 
+        internal const int WeeklySwitchMargin = 10000; // Ten percentage points at 1,000 units per point.
+        internal const int ActiveWeeklyPriority = 200001;
+
+        internal static string SelectWeeklyAccount(Dictionary<string, object> root, string preferred, DateTimeOffset now)
+        {
+            var ready = Json.Items(Json.Get(root, "accounts")).Select(Json.Map)
+                .Where(a => Json.Bool(a, "available") && !Json.Bool(a, "auth_failure") && WeeklyPriority(a, now) > 1 &&
+                    Json.Str(a, "auth_id").Length > 0 &&
+                    !Json.Bool(Json.Map(Json.Get(a, "five_hour")), "exhausted") &&
+                    (!Quota.Parse(Json.Get(a, "five_hour")).Known || Quota.Parse(Json.Get(a, "five_hour")).Remaining > 0))
+                .OrderByDescending(a => WeeklyPriority(a, now)).ThenBy(a => Json.Str(a, "auth_id"), StringComparer.Ordinal).ToList();
+            if (ready.Count == 0) return "";
+            // Seed from Fleet on first use; subsequent launches retain our confirmed preference.
+            if (String.IsNullOrEmpty(preferred)) preferred = Json.Str(root, "last_selected");
+            if (String.IsNullOrEmpty(preferred)) preferred = Json.Str(root, "next_auth_id");
+            var current = ready.FirstOrDefault(a => Json.Str(a, "auth_id") == preferred);
+            if (current != null && WeeklyPriority(ready[0], now) - WeeklyPriority(current, now) <= WeeklySwitchMargin)
+                return preferred;
+            return Json.Str(ready[0], "auth_id");
+        }
+
         async Task<bool> UpdateWeeklyRoutingAsync(Dictionary<string, object> root)
         {
             bool changed = false;
             var now = DateTimeOffset.UtcNow;
-            foreach (var item in Json.Items(Json.Get(root, "accounts")))
+            string selected = SelectWeeklyAccount(root, SettingsStore.Current.WeeklyPreferredAccount, now);
+            // Promote the replacement before demoting the old account. Fleet still
+            // handles immediate exhaustion/failure between our status polls.
+            foreach (var account in Json.Items(Json.Get(root, "accounts")).Select(Json.Map)
+                .OrderByDescending(a => Json.Str(a, "auth_id") == selected))
             {
-                var account = Json.Map(item);
                 string id = Json.Str(account, "auth_id");
                 if (id.Length == 0) continue;
-                int priority = WeeklyPriority(account, now), current;
+                int priority = id == selected ? ActiveWeeklyPriority : WeeklyPriority(account, now), current;
                 if (Int32.TryParse(Json.Str(account, "scheduler_priority"), out current) && current == priority) continue;
                 await Api(Paths.Fleet + "/annotations/account", new HttpMethod("PATCH"), new { auth_id = id, scheduler_priority = priority });
                 changed = true;
@@ -549,6 +573,13 @@ namespace ProxyDeck
                 settings["enable_usage_feedback"] = true;
                 await Api(Paths.Fleet + "/settings", HttpMethod.Put, settings);
                 changed = true;
+            }
+            // Persist only after all writes succeed, so a failed update cannot
+            // replace the remembered active account with an unconfirmed choice.
+            if (SettingsStore.Current.WeeklyPreferredAccount != selected)
+            {
+                var options = SettingsStore.Current.Copy(); options.WeeklyPreferredAccount = selected;
+                SettingsStore.Save(options);
             }
             return changed;
         }
