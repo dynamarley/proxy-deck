@@ -76,7 +76,18 @@ namespace ProxyDeck
         internal string Id, Name, Email;
         internal bool Available;
         internal double CacheAge;
+        internal bool SupportsManualResets;
+        internal int? ManualResets;
+        internal int? FableManualResets;
+        internal Quota FableWeekly;
         internal Quota Short, Long;
+        internal Account Copy() { return (Account)MemberwiseClone(); }
+        internal static int? ParseManualResets(Dictionary<string, object> data)
+        {
+            int count;
+            return Int32.TryParse(Json.Str(data, "reset_credits_available_count"), NumberStyles.Integer, CultureInfo.InvariantCulture, out count) && count >= 0
+                ? count : (int?)null;
+        }
     }
 
     internal sealed class Snapshot
@@ -102,6 +113,8 @@ namespace ProxyDeck
         internal Snapshot View = new Snapshot();
         internal event Action Changed;
         readonly HttpClient http;
+        readonly ClaudeWarmup claudeWarmup;
+        readonly PhoneDashboard phoneDashboard = new PhoneDashboard();
         readonly SemaphoreSlim lifecycle = new SemaphoreSlim(1, 1);
         readonly SemaphoreSlim refresh = new SemaphoreSlim(1, 1);
         readonly Dictionary<string, string> names = new Dictionary<string, string>();
@@ -110,12 +123,33 @@ namespace ProxyDeck
         Process proxyProcess;
         bool proxyStartedHere;
         bool authBlocked;
+        int lastRosterCount;
         DateTimeOffset lastNetworkCheck = DateTimeOffset.MinValue, lastQuotaRefresh = DateTimeOffset.MinValue;
         internal Controller(Func<string, string, int, Task<string>> execute = null, Func<bool, Task> service = null, HttpMessageHandler handler = null)
         {
             command = execute ?? Run; networkService = service ?? SetNetworkService;
             http = new HttpClient(handler ?? new HttpClientHandler { UseProxy = false });
             http.Timeout = TimeSpan.FromSeconds(6);
+            claudeWarmup = new ClaudeWarmup(Path.Combine(SettingsStore.DataRoot, "claude-warmup-state.json"), ClaudeRequest);
+        }
+
+        async Task<Dictionary<string, object>> ClaudeRequest(string path, HttpMethod method, object body, bool access)
+        {
+            if (access && method == HttpMethod.Post && (!View.Desired || !SettingsStore.Current.AutoWarm || !SettingsStore.Current.ClaudeAutoWarm))
+                throw new InvalidOperationException("Claude warmup was canceled.");
+            using (var client = new HttpClient(new HttpClientHandler { UseProxy = false }))
+            using (var request = new HttpRequestMessage(method, Paths.Api + path))
+            {
+                client.Timeout = TimeSpan.FromSeconds(90);
+                request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", access ? AccessKey() : ManagementKey());
+                if (path == "/v1/messages") request.Headers.Add("anthropic-version", "2023-06-01");
+                if (body != null) request.Content = new StringContent(new JavaScriptSerializer().Serialize(body), System.Text.Encoding.UTF8, "application/json");
+                using (var response = await client.SendAsync(request))
+                {
+                    if (!response.IsSuccessStatusCode) throw new InvalidOperationException("Claude request failed (" + (int)response.StatusCode + ").");
+                    return Json.Parse(await response.Content.ReadAsStringAsync());
+                }
+            }
         }
 
         void Signal() { var callback = Changed; if (callback != null) callback(); }
@@ -198,7 +232,8 @@ namespace ProxyDeck
                 double age;
                 Double.TryParse(Json.Str(data, "cache_age_seconds"), NumberStyles.Float, CultureInfo.InvariantCulture, out age);
                 result.Add(new Account { Id = id, Name = "Account " + (result.Count + 1).ToString("00"), Email = MaskEmail(email),
-                    Available = Json.Bool(data, "available"), Short = Quota.Parse(Json.Get(data, "five_hour")), Long = Quota.Parse(Json.Get(data, "long_window")), CacheAge = Math.Max(0, age) });
+                    Available = Json.Bool(data, "available"), Short = Quota.Parse(Json.Get(data, "five_hour")), Long = Quota.Parse(Json.Get(data, "long_window")), CacheAge = Math.Max(0, age),
+                    SupportsManualResets = true, ManualResets = Account.ParseManualResets(data) });
             }
             return result;
         }
@@ -225,7 +260,7 @@ namespace ProxyDeck
             if (!View.NetworkReady) throw new InvalidOperationException("Tailscale is disconnected. Check your Tailscale account.");
             string dns = Json.Str(Json.Map(Json.Get(status, "Self")), "DNSName").TrimEnd('.');
             string endpoint = dns + ":" + SettingsStore.Current.Port;
-            if (dns.Length > 0) View.RemoteUrl = "https://" + endpoint + "/v0/resource/plugins/codex-fleet-manager/status";
+            if (dns.Length > 0) View.RemoteUrl = "https://" + endpoint + PhoneDashboard.Path;
             if (dns.Length == 0) { View.NetworkReady = false; throw new NetworkSetupException("Complete the Tailscale MagicDNS and HTTPS setup."); }
             try
             {
@@ -246,6 +281,22 @@ namespace ProxyDeck
                         View.NetworkReady = Json.Str(Json.Map(Json.Get(Json.Map(Json.Get(configured, "Handlers")), "/")), "Proxy") == Paths.Api;
                     }
                     if (!View.NetworkReady) throw new NetworkSetupException("Enable Tailscale HTTPS/Serve, then check the connection again.");
+                }
+                if (ensureServe) phoneDashboard.EnsureStarted();
+                var current = Json.Parse(await command(Paths.Tailscale, "serve status --json", 8000));
+                var page = ServeHandler(current, PhoneDashboard.Path);
+                if (PhoneDashboard.Target.Length == 0 || Json.Str(page, "Proxy") != PhoneDashboard.Target)
+                {
+                    View.NetworkReady = false;
+                    if (page.Count > 0 && Json.Str(page, "Proxy") != phoneDashboard.PreviousTarget)
+                        throw new NetworkSetupException("The phone dashboard path serves another app. Remove that path or choose a different port in Setup & components.");
+                    if (ensureServe)
+                    {
+                        await command(Paths.Tailscale, "serve --bg --yes --https=" + SettingsStore.Current.Port + " --set-path=" + PhoneDashboard.Path + " " + PhoneDashboard.Target, 15000);
+                        current = Json.Parse(await command(Paths.Tailscale, "serve status --json", 8000));
+                        View.NetworkReady = Json.Str(ServeHandler(current, PhoneDashboard.Path), "Proxy") == PhoneDashboard.Target;
+                    }
+                    if (!View.NetworkReady) throw new NetworkSetupException("The phone quota page is unavailable. Turn Tailscale off and on in Proxy Deck to repair it.");
                 }
             }
             catch (Exception error) { View.NetworkReady = false; if (error is NetworkSetupException) throw; throw new NetworkSetupException("Enable Tailscale HTTPS/Serve, then check the connection again."); }
@@ -340,6 +391,12 @@ namespace ProxyDeck
                 else
                 {
                     var serve = Json.Parse(await command(Paths.Tailscale, "serve status --json", 8000));
+                    if (PhoneDashboard.Target.Length > 0 && Json.Str(ServeHandler(serve, PhoneDashboard.Path), "Proxy") == PhoneDashboard.Target)
+                    {
+                        await command(Paths.Tailscale, "serve --bg --yes --https=" + SettingsStore.Current.Port + " --set-path=" + PhoneDashboard.Path + " off", 15000);
+                        if (Json.Str(ServeHandler(Json.Parse(await command(Paths.Tailscale, "serve status --json", 8000)), PhoneDashboard.Path), "Proxy") == PhoneDashboard.Target)
+                            throw new InvalidOperationException("The phone quota page is still enabled. Try again.");
+                    }
                     if (OwnsServeHandler(serve))
                     {
                         await command(Paths.Tailscale, "serve --bg --yes --https=" + SettingsStore.Current.Port + " --set-path=/ off", 15000);
@@ -347,6 +404,7 @@ namespace ProxyDeck
                             throw new InvalidOperationException("Tailscale access is still enabled. Try again.");
                     }
                     if (SettingsStore.Current.ExclusiveTailscale) await networkService(false);
+                    phoneDashboard.Dispose();
                     View.NetworkReady = false; View.RemoteUrl = "";
                 }
                 var options = SettingsStore.Current.Copy(); options.UseTailscale = enabled; SettingsStore.Save(options);
@@ -359,6 +417,11 @@ namespace ProxyDeck
         {
             return Json.Map(Json.Get(serve, "Web")).Any(entry => entry.Key.EndsWith(":" + SettingsStore.Current.Port, StringComparison.Ordinal) &&
                 Json.Str(Json.Map(Json.Get(Json.Map(Json.Get(Json.Map(entry.Value), "Handlers")), "/")), "Proxy") == Paths.Api);
+        }
+        static Dictionary<string, object> ServeHandler(Dictionary<string, object> serve, string path)
+        {
+            return Json.Map(Json.Get(serve, "Web")).Where(entry => entry.Key.EndsWith(":" + SettingsStore.Current.Port, StringComparison.Ordinal))
+                .Select(entry => Json.Map(Json.Get(Json.Map(Json.Get(Json.Map(entry.Value), "Handlers")), path))).FirstOrDefault() ?? new Dictionary<string, object>();
         }
 
         internal async Task StartAsync()
@@ -381,13 +444,13 @@ namespace ProxyDeck
                 Stage("Starting CLIProxy");
                 await EnsureProxy();
                 if (SettingsStore.Current.ApplyFleetSettings) await ApplyFleetSettingsAsync();
-                Stage("Reading account limits");
+                Stage("Preparing account services");
                 // The HTTP listener can be ready before Fleet Manager's initial
                 // roster/quota refresh. Wait for that data instead of a fixed delay.
                 for (int i = 0; i < 12; i++)
                 {
-                    await RefreshAsync(false, false);
-                    if (View.Accounts.Count > 0 || View.Error.Length > 0) break;
+                    await RefreshAsync(false, false, true, false);
+                    if (lastRosterCount > 0 || View.Error.Length > 0) break;
                     await Task.Delay(1000);
                 }
                 if (networkError != null) throw networkError;
@@ -409,8 +472,7 @@ namespace ProxyDeck
             if (existing.Length == 1) proxyProcess = existing[0];
             else
             {
-                if (System.Net.NetworkInformation.IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners().Any(p => p.Port == SettingsStore.Current.Port))
-                    throw new InvalidOperationException("The API port is already in use. Check your port or the other launcher.");
+                EnsureApiPortAvailable(SettingsStore.Current.Port);
                 proxyStartedHere = true; proxyProcess = new Process();
                 proxyProcess.StartInfo = new ProcessStartInfo(Paths.ProxyExe, "-config \"" + Path.Combine(Paths.Proxy, "config.yaml") + "\"")
                 { WorkingDirectory = Paths.Proxy, UseShellExecute = false, CreateNoWindow = true, WindowStyle = ProcessWindowStyle.Hidden, RedirectStandardOutput = true, RedirectStandardError = true };
@@ -435,6 +497,21 @@ namespace ProxyDeck
             throw new TimeoutException("CLIProxy did not respond.");
         }
 
+        internal static void EnsureApiPortAvailable(int port)
+        {
+            // Tailscale Serve may already listen on this port at the tailnet IP.
+            // Test the actual local API endpoint instead of every network adapter.
+            var probe = new System.Net.Sockets.TcpListener(IPAddress.Loopback, port);
+            try { probe.ExclusiveAddressUse = true; probe.Start(1); }
+            catch (System.Net.Sockets.SocketException error)
+            {
+                throw new InvalidOperationException(error.SocketErrorCode == System.Net.Sockets.SocketError.AddressAlreadyInUse
+                    ? "The API port " + port + " is already in use on 127.0.0.1. Close the other local server or choose another API port."
+                    : "The API port " + port + " is unavailable on 127.0.0.1. Check Windows port reservations or choose another API port.");
+            }
+            finally { probe.Stop(); }
+        }
+
         internal static IEnumerable<Process> MatchingProcesses(string path)
         {
             foreach (var p in Process.GetProcessesByName(Path.GetFileNameWithoutExtension(path)))
@@ -445,7 +522,7 @@ namespace ProxyDeck
             }
         }
 
-        internal async Task RefreshAsync(bool requestFresh, bool checkNetwork, bool updateRouting = true)
+        internal async Task RefreshAsync(bool requestFresh, bool checkNetwork, bool updateRouting = true, bool publishQuotas = true)
         {
             if (!await refresh.WaitAsync(0)) return;
             try
@@ -469,9 +546,16 @@ namespace ProxyDeck
                 var root = await Api(Paths.Fleet + "/status?format=json", false);
                 if (updateRouting && SettingsStore.Current.PreferWeeklyQuota && await UpdateWeeklyRoutingAsync(root))
                     root = await Api(Paths.Fleet + "/status?format=json", false);
-                View.Accounts = ParseAccounts(root, names);
+                var accounts = ParseAccounts(root, names);
+                lastRosterCount = accounts.Count;
                 View.Warmup = Json.Bool(Json.Map(Json.Get(root, "settings")), "enable_reset_probe");
-                View.ReadAt = DateTimeOffset.Now; View.ProxyReady = true;
+                if (SettingsStore.Current.ClaudeAutoWarm)
+                    await claudeWarmup.Tick(updateRouting && View.Warmup && SettingsStore.Current.AutoWarm, SettingsStore.Current.ResetDelaySeconds, DateTimeOffset.UtcNow, requestFresh);
+                if (SettingsStore.Current.ClaudeAutoWarm && claudeWarmup.Account != null)
+                    accounts.Add(claudeWarmup.Account.Copy());
+                // Background maintenance must not replace the user's last explicit snapshot.
+                if (publishQuotas) { View.Accounts = accounts; View.ReadAt = DateTimeOffset.Now; }
+                View.ProxyReady = true;
                 if (!View.Busy && (!SettingsStore.Current.UseTailscale || View.NetworkReady)) View.Error = "";
                 if (checkNetwork && DateTimeOffset.UtcNow - lastNetworkCheck > TimeSpan.FromMinutes(2)) await ReadNetwork(false);
             }
@@ -492,6 +576,7 @@ namespace ProxyDeck
         internal void AllowAuthRetry() { authBlocked = false; }
         internal void ResetConfiguration()
         {
+            phoneDashboard.Dispose();
             authBlocked = false; names.Clear(); View.Accounts.Clear(); View.ReadAt = null;
             View.RemoteUrl = ""; View.NetworkReady = false; View.ProxyReady = false;
             lastQuotaRefresh = lastNetworkCheck = DateTimeOffset.MinValue;
@@ -598,7 +683,7 @@ namespace ProxyDeck
                 if (!View.Desired) throw new InvalidOperationException("The system was stopped. Account sign-in was canceled.");
                 var status = await Api("/v0/management/get-auth-status?state=" + Uri.EscapeDataString(state), false);
                 string outcome = Json.Str(status, "status");
-                if (outcome == "ok") { await RefreshAsync(true, false); return; }
+                if (outcome == "ok") { await RefreshAsync(false, false, true, false); return; }
                 if (outcome == "error") throw new InvalidOperationException("Account sign-in failed. Please try again.");
             }
             throw new TimeoutException("Account sign-in timed out. You can try connecting again.");
@@ -624,6 +709,7 @@ namespace ProxyDeck
                     }
                 });
                 if (SettingsStore.Current.UseTailscale && SettingsStore.Current.ExclusiveTailscale) await networkService(false);
+                phoneDashboard.Dispose();
                 View.ProxyReady = false; View.NetworkReady = false; Stage("SYSTEM STOPPED"); Paths.Log("stack stopped");
             }
             catch (Exception error) { View.Error = Friendly(error); Stage("Shutdown failed"); Paths.Log("stop failed: " + error.GetType().Name); }
@@ -640,6 +726,6 @@ namespace ProxyDeck
             if (error is InvalidOperationException && error.InnerException is System.ComponentModel.Win32Exception) return "Tailscale service permission is missing. Run its service setup again.";
             return error is InvalidOperationException ? error.Message : "The operation failed. Try reopening the app.";
         }
-        public void Dispose() { http.Dispose(); if (proxyProcess != null) proxyProcess.Dispose(); }
+        public void Dispose() { phoneDashboard.Dispose(); http.Dispose(); if (proxyProcess != null) proxyProcess.Dispose(); }
     }
 }

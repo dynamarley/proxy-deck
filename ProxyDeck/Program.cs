@@ -57,7 +57,7 @@ namespace ProxyDeck
             AddAsync("Exit and stop system", Quit);
             currentIcon = Art.Icon(true);
             tray = new NotifyIcon { Icon = currentIcon, Text = "Proxy Deck · starting", Visible = true, ContextMenuStrip = menu };
-            tray.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) { if (form.Visible) form.Hide(); else { form.ShowPanel(); lastPoll = DateTimeOffset.MinValue; } } };
+            tray.MouseClick += (s, e) => { if (e.Button == MouseButtons.Left) { if (form.Visible) form.Hide(); else form.ShowPanel(); } };
             form.ContextRequested += () => menu.Show(Cursor.Position);
             form.TailscaleSetupRequested += async () => await Configure(true);
             controller.Changed += Update;
@@ -93,16 +93,16 @@ namespace ProxyDeck
         {
             if (exiting || configuring) return;
             if (exitEvent.WaitOne(0)) { exitEvent.Reset(); await Quit(); return; }
-            if (showEvent.WaitOne(0)) { showEvent.Reset(); form.ShowPanel(); lastPoll = DateTimeOffset.MinValue; }
+            if (showEvent.WaitOne(0)) { showEvent.Reset(); form.ShowPanel(); }
             if (form.Visible) form.Invalidate();
             if (polling || controller.View.Busy || !controller.View.Desired) return;
-            int interval = form.Visible ? 30 : 90;
+            const int interval = 90;
             if (DateTimeOffset.Now - lastPoll < TimeSpan.FromSeconds(interval)) return;
             polling = true; lastPoll = DateTimeOffset.Now;
             try
             {
                 if (!controller.View.ProxyReady) await controller.StartAsync();
-                else await controller.RefreshAsync(form.Visible, true);
+                else await controller.RefreshAsync(false, true, true, false);
             }
             finally { polling = false; }
         }

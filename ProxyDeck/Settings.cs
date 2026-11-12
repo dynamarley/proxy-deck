@@ -13,11 +13,13 @@ namespace ProxyDeck
         public bool Completed;
         public string ProxyDirectory = "";
         public int Port = 8317;
+        public int PhoneDashboardPort;
         public bool UseTailscale;
         public bool ExclusiveTailscale;
         public bool ManageExistingProxy;
         public bool ManagedInstall;
         public bool AutoWarm;
+        public bool ClaudeAutoWarm;
         public bool PreferWeeklyQuota;
         public string WeeklyPreferredAccount = "";
         public int ResetDelaySeconds = 60;
@@ -32,6 +34,7 @@ namespace ProxyDeck
         {
             if (Schema != 2) throw new InvalidOperationException("This settings file requires a newer version of Proxy Deck.");
             if (Port < 1024 || Port > 65535) throw new InvalidOperationException("The port must be between 1024 and 65535.");
+            if (PhoneDashboardPort != 0 && (PhoneDashboardPort < 1024 || PhoneDashboardPort > 65535 || PhoneDashboardPort == Port)) throw new InvalidOperationException("The phone dashboard requires a separate local port.");
             if (ResetDelaySeconds < 60 || ResetDelaySeconds > 900) throw new InvalidOperationException("The warmup delay must be between 1 and 15 minutes.");
             if (String.IsNullOrWhiteSpace(ProxyDirectory) || !Path.IsPathRooted(ProxyDirectory)) throw new InvalidOperationException("Choose a valid CLIProxy folder.");
             ProxyDirectory = Path.GetFullPath(ProxyDirectory).TrimEnd(Path.DirectorySeparatorChar);

@@ -36,6 +36,11 @@ jobs:
           $p = Start-Process ./ProxyDeck/build/ProxyDeck.exe -ArgumentList '--self-test "self-test.json"' -Wait -PassThru
           Get-Content self-test.json
           if ($p.ExitCode -ne 0) { throw 'Quota verification failed' }
+      - name: Verify phone dashboard quota parsing
+        shell: powershell
+        run: |
+          node ./ProxyDeck/PhoneDashboardVerification.cjs
+          if ($LASTEXITCODE -ne 0) { throw 'Phone quota verification failed' }
       - uses: actions/upload-artifact@v4
         with:
           name: ProxyDeck-Windows-x64

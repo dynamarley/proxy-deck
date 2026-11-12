@@ -17,13 +17,14 @@ namespace ProxyDeck
         sealed class TestFleet : HttpMessageHandler
         {
             internal readonly Dictionary<string, object> Root = Json.Parse("{\"accounts\":[],\"settings\":{\"handle_enabled\":false,\"enable_usage_feedback\":false,\"enable_reset_probe\":true,\"retry_enabled\":false,\"custom_field\":\"preserve\"}}");
-            internal int Patches, Puts;
+            internal int Patches, Puts, Refreshes;
             internal bool FailPatch;
             protected override async Task<HttpResponseMessage> SendAsync(HttpRequestMessage request, CancellationToken cancellation)
             {
                 string path = request.RequestUri.AbsolutePath;
                 object result = Root;
                 if (path.EndsWith("/auth-files")) result = new { files = new object[0] };
+                else if (path.EndsWith("/refresh")) { Refreshes++; result = new { ok = true }; }
                 else if (request.Method.Method == "PATCH")
                 {
                     if (FailPatch) return new HttpResponseMessage(HttpStatusCode.ServiceUnavailable);
@@ -138,11 +139,47 @@ namespace ProxyDeck
             }
         }
 
+        static async Task VerifyManualQuotaDisplay(List<string> passed)
+        {
+            var a = WeeklyAccount("a", 97); var b = WeeklyAccount("b", 40);
+            a["reset_credits_available_count"] = 2;
+            b["reset_credits_available_count"] = 0;
+            var fake = new TestFleet(); fake.Root["accounts"] = new object[] { a, b };
+            SettingsStore.Current.PreferWeeklyQuota = true; SettingsStore.Current.WeeklyPreferredAccount = "";
+            using (var model = new Controller(handler: fake))
+            {
+                await model.RefreshAsync(false, false, true, false);
+                Check(model.View.Accounts.Count == 0 && !model.View.ReadAt.HasValue && fake.Refreshes == 0 && model.View.ProxyReady,
+                    "startup maintenance leaves quota display empty without requesting a fresh quota", passed);
+                await model.RefreshAsync(true, false);
+                var snapshot = model.View.Accounts; var readAt = model.View.ReadAt;
+                Check(snapshot[0].SupportsManualResets && snapshot[0].ManualResets == 2 && snapshot[1].ManualResets == 0,
+                    "manual reset credits distinguish available rights from zero", passed);
+                Check(!Account.ParseManualResets(Json.Parse("{}")).HasValue && !Account.ParseManualResets(Json.Parse("{\"reset_credits_available_count\":-1}")).HasValue &&
+                    !Account.ParseManualResets(Json.Parse("{\"reset_credits_available_count\":1.5}")).HasValue && !new Account().SupportsManualResets,
+                    "missing or invalid manual reset counts stay unknown and other providers do not claim support", passed);
+                Check(snapshot.Count == 2 && snapshot[0].Long.Remaining == 97 && readAt.HasValue && fake.Refreshes == 1,
+                    "explicit Refresh loads account limits and requests fresh quota", passed);
+                Json.Map(a["long_window"])["remaining_percent"] = 20;
+                a["reset_credits_available_count"] = 1;
+                await model.RefreshAsync(false, false, true, false);
+                Check(Object.ReferenceEquals(snapshot, model.View.Accounts) && model.View.ReadAt == readAt && model.View.Accounts[0].Long.Remaining == 97 && fake.Refreshes == 1,
+                    "background maintenance cannot replace percentages or snapshot time", passed);
+                Check(model.View.Accounts[0].ManualResets == 2, "background maintenance preserves the displayed manual reset count", passed);
+                Check(SettingsStore.Load().WeeklyPreferredAccount == "b" && Convert.ToInt32(b["scheduler_priority"]) == Controller.ActiveWeeklyPriority,
+                    "manual display mode preserves automatic routing using current background evidence", passed);
+                await model.RefreshAsync(true, false);
+                Check(model.View.Accounts[0].Long.Remaining == 20 && !Object.ReferenceEquals(snapshot, model.View.Accounts) && fake.Refreshes == 1,
+                    "a second explicit Refresh publishes current data while retaining the one-minute upstream throttle", passed);
+                Check(model.View.Accounts[0].ManualResets == 1, "explicit Refresh updates the displayed manual reset count", passed);
+            }
+        }
+
         // A separate tailnet cannot be provisioned in CI. Exercise the real controller
         // and settings persistence with a stateful Tailscale boundary, never the host service.
         sealed class TestNetwork
         {
-            internal bool Owned, ForeignRoot, FailRemove, FailStart, Running = true;
+            internal bool Owned, PageOwned, ForeignPage, ForeignRoot, FailRemove, FailStart, Running = true;
             internal int Stops, PendingStatuses;
             internal readonly List<string> Commands = new List<string>();
             internal Task Service(bool running)
@@ -164,6 +201,7 @@ namespace ProxyDeck
                 {
                     var handlers = new Dictionary<string, object> { { "/other", new { Proxy = "http://127.0.0.1:9999" } } };
                     if (Owned || ForeignRoot) handlers["/"] = new { Proxy = ForeignRoot ? "http://127.0.0.1:9998" : Paths.Api };
+                    if (PageOwned || ForeignPage) handlers[PhoneDashboard.Path] = new { Proxy = ForeignPage ? "http://127.0.0.1:9997" : PhoneDashboard.Target };
                     var web = new Dictionary<string, object> { { "test-node.example.ts.net:" + SettingsStore.Current.Port, new { Handlers = handlers } } };
                     return Task.FromResult(new JavaScriptSerializer().Serialize(new { Web = web }));
                 }
@@ -173,11 +211,49 @@ namespace ProxyDeck
                     Owned = false; return Task.FromResult("");
                 }
                 if (args == "serve --bg --yes --https=" + SettingsStore.Current.Port + " " + Paths.Api) { Owned = true; return Task.FromResult(""); }
+                if (args == "serve --bg --yes --https=" + SettingsStore.Current.Port + " --set-path=" + PhoneDashboard.Path + " " + PhoneDashboard.Target) { PageOwned = true; return Task.FromResult(""); }
+                if (args == "serve --bg --yes --https=" + SettingsStore.Current.Port + " --set-path=" + PhoneDashboard.Path + " off")
+                {
+                    if (FailRemove) throw new InvalidOperationException("Simulated page removal failure.");
+                    PageOwned = false; return Task.FromResult("");
+                }
                 throw new InvalidOperationException("Unexpected Tailscale command in verification.");
             }
         }
         static void Check(bool result, string scenario, List<string> passed)
         { if (!result) throw new InvalidOperationException("Verification failed: " + scenario); passed.Add(scenario); }
+        static void VerifyApiPort(List<string> passed)
+        {
+            var other = new TcpListener(IPAddress.Parse("127.0.0.2"), 0);
+            other.ExclusiveAddressUse = true; other.Start();
+            try
+            {
+                int port = ((IPEndPoint)other.LocalEndpoint).Port;
+                Check(System.Net.NetworkInformation.IPGlobalProperties.GetIPGlobalProperties().GetActiveTcpListeners().Any(p => p.Port == port),
+                    "port regression fixture reproduces an existing listener on a different address", passed);
+                Controller.EnsureApiPortAvailable(port);
+                Check(true, "a listener on another address does not block the loopback API port", passed);
+                var local = new TcpListener(IPAddress.Loopback, port); local.ExclusiveAddressUse = true; local.Start();
+                try
+                {
+                    bool rejected = false;
+                    try { Controller.EnsureApiPortAvailable(port); } catch (InvalidOperationException) { rejected = true; }
+                    Check(rejected, "an occupied loopback API endpoint is still rejected", passed);
+                }
+                finally { local.Stop(); }
+                Controller.EnsureApiPortAvailable(port);
+                Check(true, "released loopback ports can be used while the other-address listener remains running", passed);
+            }
+            finally { other.Stop(); }
+            var wildcard = new TcpListener(IPAddress.Any, 0); wildcard.ExclusiveAddressUse = true; wildcard.Start();
+            try
+            {
+                bool rejected = false;
+                try { Controller.EnsureApiPortAvailable(((IPEndPoint)wildcard.LocalEndpoint).Port); } catch (InvalidOperationException) { rejected = true; }
+                Check(rejected, "a wildcard listener that occupies loopback is still rejected", passed);
+            }
+            finally { wildcard.Stop(); }
+        }
         internal static async Task<int> Run(string output, bool integration)
         {
             var passed = new List<string>(); string error = "";
@@ -188,6 +264,8 @@ namespace ProxyDeck
             {
                 SettingsStore.DataRoot = testRoot; SettingsStore.Current = new AppSettings { ProxyDirectory = Path.Combine(testRoot, "CLI Proxy Unicode \u03A9") };
                 Directory.CreateDirectory(testRoot);
+                VerifyApiPort(passed);
+                await ClaudeVerification.Run(testRoot, passed);
                 string sample = "config-version: 8\nserver:\n  host: \"localhost\"\n  port: 1234\nplugins:\n  enabled: false\n  configs:\n    other:\n      enabled: true\n# end\n";
                 string edited = ConfigEditor.Set(sample, new[] { "plugins", "configs", "codex-fleet-manager", "enabled" }, "true");
                 edited = ConfigEditor.Set(edited, new[] { "plugins", "enabled" }, "true");
@@ -219,6 +297,7 @@ namespace ProxyDeck
                 SettingsStore.Current = options.Copy();
                 await VerifyWeeklyRouting(passed);
                 await VerifyStableWeeklyRouting(passed);
+                await VerifyManualQuotaDisplay(passed);
                 SettingsStore.Save(options); Check(!SettingsStore.Load().UseTailscale && !SettingsStore.Load().AutoWarm, "fresh installation defaults to local mode and no warmup", passed);
                 string generated = Provisioner.NewConfig(options, secret, SettingsStore.NewKey(), Path.Combine(options.ProxyDirectory, "plugins"));
                 Check(generated.Contains("allow-remote: false") && generated.Contains("enable_reset_probe: false") && generated.Contains("handle_enabled: false"), "new proxy starts loopback-only with passive Fleet settings", passed);
@@ -235,7 +314,17 @@ namespace ProxyDeck
                     SettingsStore.Save(options);
                     Check(File.Exists(Path.Combine(options.ProxyDirectory, "cli-proxy-api.exe")), "official CLIProxy download verified and installed in a Unicode path", passed);
                     var network = new TestNetwork();
-                    controller = new Controller(network.Run, network.Service); await controller.StartAsync();
+                    // A separate address models Serve starting before CLIProxy on
+                    // the same port, without touching the real Tailscale service.
+                    var serveListener = new TcpListener(IPAddress.Parse("127.0.0.2"), options.Port);
+                    serveListener.ExclusiveAddressUse = true; serveListener.Start();
+                    try
+                    {
+                        controller = new Controller(network.Run, network.Service); await controller.StartAsync();
+                        Check(controller.View.Ready && controller.View.Error.Length == 0,
+                            "CLIProxy cold-starts while another address already listens on the same port", passed);
+                    }
+                    finally { serveListener.Stop(); }
                     Check(controller.View.Ready && controller.View.Error.Length == 0 && controller.View.Accounts.Count == 0, "clean local proxy starts without Tailscale or logged-in accounts", passed);
                     using (var client = new HttpClient(new HttpClientHandler { UseProxy = false }))
                     {
@@ -256,9 +345,13 @@ namespace ProxyDeck
                         Check(!Json.Bool(settings, "enable_reset_probe") && !SettingsStore.Load().AutoWarm, "warmup can be disabled and the choice survives settings reload", passed);
                         int proxyId = Controller.MatchingProcesses(Paths.ProxyExe).Select(process => { int id = process.Id; process.Dispose(); return id; }).Single();
                         network.PendingStatuses = 2; await controller.SetTailscaleAsync(true);
-                        Check(SettingsStore.Load().UseTailscale && controller.View.NetworkReady && network.Owned && network.PendingStatuses == 0, "Tailscale toggle waits for backend startup before confirming phone access", passed);
+                        Check(SettingsStore.Load().UseTailscale && controller.View.NetworkReady && network.Owned && network.PageOwned && network.PendingStatuses == 0, "Tailscale toggle waits for backend startup and configures the combined phone page", passed);
+                        using (var page = await client.GetAsync(PhoneDashboard.Target))
+                            Check(page.IsSuccessStatusCode && (await page.Content.ReadAsStringAsync()).Contains("Codex and Claude"), "phone listener serves the embedded multi-provider page", passed);
+                        using (var rejectedPage = await client.PostAsync(PhoneDashboard.Target, new StringContent("test")))
+                            Check(rejectedPage.StatusCode == HttpStatusCode.MethodNotAllowed, "phone listener rejects write requests instead of proxying them", passed);
                         await controller.SetTailscaleAsync(false);
-                        Check(!SettingsStore.Load().UseTailscale && !network.Owned && network.Stops == 0 && network.Running, "shared Tailscale toggle removes only app access and leaves the service running", passed);
+                        Check(!SettingsStore.Load().UseTailscale && !network.Owned && !network.PageOwned && network.Stops == 0 && network.Running, "shared Tailscale toggle removes only app access and leaves the service running", passed);
                         options = SettingsStore.Current; options.ExclusiveTailscale = true; SettingsStore.Save(options);
                         await controller.SetTailscaleAsync(true); await controller.SetTailscaleAsync(false);
                         Check(network.Stops == 1 && !network.Running && SettingsStore.Load().ExclusiveTailscale, "exclusive Tailscale toggle stops the service and preserves the on-demand preference", passed);
@@ -274,6 +367,10 @@ namespace ProxyDeck
                         try { await controller.SetTailscaleAsync(true); } catch (NetworkSetupException) { rejected = true; }
                         Check(rejected && network.ForeignRoot && !network.Owned && !SettingsStore.Load().UseTailscale, "Tailscale enable refuses to replace another app's root handler", passed);
                         network.ForeignRoot = false;
+                        network.ForeignPage = true; rejected = false;
+                        try { await controller.SetTailscaleAsync(true); } catch (NetworkSetupException) { rejected = true; }
+                        Check(rejected && network.ForeignPage && !network.PageOwned && !SettingsStore.Load().UseTailscale, "phone page refuses to replace an unrelated Serve handler", passed);
+                        network.ForeignPage = false;
                         using (var response = await client.GetAsync(Paths.Api + "/")) Check(response.IsSuccessStatusCode && Controller.MatchingProcesses(Paths.ProxyExe).Select(process => { int id = process.Id; process.Dispose(); return id; }).Single() == proxyId, "network toggles keep the same local proxy process and API running", passed);
                         Check(!network.Commands.Any(value => value.Contains("reset") || value.StartsWith("down", StringComparison.Ordinal)), "network toggles never reset Serve or disconnect the shared tailnet", passed);
                     }
