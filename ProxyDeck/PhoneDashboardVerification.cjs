@@ -29,5 +29,15 @@ vm.runInContext(script, context);
  assert.equal(vm.runInContext('claudeResetCount({cedar_ember:{eligible:true,grants:[]}},true)', context), 0);
  assert.equal(vm.runInContext('fableWindow({seven_day_fable:{utilization:20}}).remaining', context), 80);
  assert.equal(vm.runInContext('claudeResetCount({cedar_ember:{eligible:true,grants:[{resets_left:-1,paused:false}]}},true)', context), null);
- console.log(JSON.stringify({ok:true, checks:12}));
+ for(const classification of ['undefined','"true"']){
+  const value=`{cedar_ember:{eligible:true,grants:[{resets_left:2,paused:false,gives_back_weekly:${classification}}]}}`;
+  assert.equal(vm.runInContext(`claudeResetCount(${value},false)`, context), 2);
+  assert.equal(vm.runInContext(`claudeResetCount(${value},true)`, context), null, 'unknown grant classification cannot claim zero Fable resets');
+ }
+ for(const [value,want] of [[2,2],[0,0],[undefined,null]]){
+  context.codexFixture={accounts:[{auth_id:'codex-test',reset_credits_available_count:value}]};
+  const codex=await vm.runInContext('loadAccounts(codexFixture, [])', context);
+  assert.equal(codex[0].manualResets,want,'phone Codex cards preserve remaining manual reset credits and unknown counts');
+ }
+ console.log(JSON.stringify({ok:true, checks:19}));
 })().catch(error => {console.error(error.message);process.exitCode=1;});

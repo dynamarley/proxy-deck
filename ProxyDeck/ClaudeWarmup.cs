@@ -95,11 +95,28 @@ namespace ProxyDeck
                 if (!Reset(window).HasValue && Json.Str(state, "observed_auth") == Json.Str(auth, "name") &&
                     DateTimeOffset.TryParse(Json.Str(state, "observed_reset"), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out knownReset) &&
                     now < knownReset.AddSeconds(resetDelay)) return;
-                string key = Reset(window).HasValue ? observed : Json.Str(auth, "name") + ":idle:" + Json.Str(state, "observed_window");
-                if (Json.Str(state, "attempted_window") == key) return;
+                string previousWindow = Json.Str(state, "observed_auth") == Json.Str(auth, "name") ? Json.Str(state, "observed_window") : "";
+                string key = Reset(window).HasValue ? observed : previousWindow.Length > 0 ? previousWindow : Json.Str(auth, "name") + ":idle";
+                if (Json.Str(state, "attempted_window") == key ||
+                    Json.Str(state, "attempted_window") == Json.Str(auth, "name") + ":idle:" + previousWindow) return;
+                // An idle response and a subsequently reported stale boundary can
+                // describe the same window. Only a boundary after our reservation
+                // is evidence that another attempt belongs to a new window.
+                DateTimeOffset attemptedAt, observedReset;
+                if (Json.Str(state, "attempted_window").StartsWith(Json.Str(auth, "name") + ":", StringComparison.Ordinal) &&
+                    DateTimeOffset.TryParse(Json.Str(state, "attempted_at"), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out attemptedAt) &&
+                    DateTimeOffset.TryParse(Json.Str(state, "observed_reset"), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out observedReset) &&
+                    attemptedAt >= observedReset) return;
                 var fleet = await send(Paths.Fleet + "/settings", HttpMethod.Get, null, false);
                 if (Json.Bool(fleet, "retry_enabled")) { Status = "Disable model retry chains before Claude warmup."; return; }
                 if (Json.Str(auth, "request_retry") != "0") { Status = "Set Claude credential request_retry to zero before warmup."; return; }
+                var enforcement = await send("/v0/management/force-model-prefix", HttpMethod.Get, null, false);
+                if (!Json.Bool(enforcement, "force-model-prefix")) { Status = "Enable force-model-prefix before Claude warmup."; return; }
+                // The pinned CLIProxy version omits prefix from the roster. Read
+                // the selected file without persisting or logging its contents.
+                var credential = await send("/v0/management/auth-files/download?name=" + Uri.EscapeDataString(Json.Str(auth, "name")), HttpMethod.Get, null, false);
+                if (Json.Str(credential, "type") != "claude" || Json.Str(credential, "prefix") != Prefix || Json.Str(credential, "request_retry") != "0")
+                { Status = "Set the Claude credential prefix to manual-claude and request_retry to zero."; return; }
                 var catalog = await send("/v1/models", HttpMethod.Get, null, true);
                 if (!Json.Items(Json.Get(catalog, "data")).Select(Json.Map).Any(m => Json.Str(m, "id") == Prefix + "/claude-opus-5-5" && Json.Str(m, "owned_by") == "anthropic"))
                 { Status = "The manual-claude Opus 5.5 model is unavailable."; return; }

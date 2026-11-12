@@ -40,6 +40,7 @@ async function api(path,body){
 }
 const number=value=>value!==null&&value!==undefined&&value!==''&&Number.isFinite(Number(value))?Number(value):null;
 function codexWindow(value){const q=value||{},n=number(q.remaining_percent);return{remaining:!q.missing&&n!==null?Math.min(100,Math.max(0,n)):null,reset:q.reset_at,kind:q.kind};}
+function codexResetCount(value){const n=typeof value==='number'||typeof value==='string'?number(value):null;return Number.isInteger(n)&&n>=0&&n<=2147483647?n:null;}
 function claudeWindow(value){const q=value||{},n=number(q.utilization);return{remaining:n!==null&&n>=0&&n<=100?100-n:null,reset:q.resets_at};}
 function fableWindow(usage){
  const limits=(Array.isArray(usage.limits)?usage.limits:[]).filter(q=>q?.kind==='weekly_scoped'&&(['fable','fable 5'].includes(String(q.scope?.model?.display_name||'').trim().toLowerCase())||String(q.scope?.model?.id||'').startsWith('claude-fable-'))).sort((a,b)=>Number(b.is_active===true)-Number(a.is_active===true));
@@ -56,6 +57,7 @@ function claudeResetCount(usage,fableOnly){
   if(grant.resets_total!==null&&grant.resets_total!==undefined&&(!Number.isInteger(grant.resets_total)||grant.resets_total<grant.resets_left))return null;
   let available=!grant.paused&&grant.resets_left>0;
   for(const key of ['starts_at','ends_at']){if(grant[key]===null||grant[key]===undefined)continue;const date=Date.parse(grant[key]);if(!Number.isFinite(date))return null;if(key==='starts_at'?now<date:now>=date)available=false;}
+  if(available&&fableOnly&&typeof grant.gives_back_weekly!=='boolean')return null;
   if(available&&(!fableOnly||grant.gives_back_weekly===true))total+=grant.resets_left;
   if(total>2147483647)return null;
  }
@@ -79,9 +81,10 @@ function quotaCard(account){
   bar.setAttribute('role','meter');bar.setAttribute('aria-label',label);bar.setAttribute('aria-valuemin','0');bar.setAttribute('aria-valuemax','100');if(q.remaining!==null)bar.setAttribute('aria-valuenow',String(q.remaining));
   block.append(row,bar,node('p','reset',resetText(q.reset)));card.append(block);
  }
- if(account.provider==='Claude'){
+ if(account.provider==='Claude'||account.provider==='Codex'){
   const counts=node('div','summary');counts.style.marginTop='14px';counts.style.marginBottom='0';
-  counts.append(node('span','chip','Manual resets · '+(account.manualResets??'—')),node('span','chip','Fable resets · '+(account.fableResets??'—')));card.append(counts);
+  counts.append(node('span','chip','Manual resets · '+(account.manualResets??'—')));
+  if(account.provider==='Claude')counts.append(node('span','chip','Fable resets · '+(account.fableResets??'—')));card.append(counts);
  }
  if(account.error)card.append(node('p','message',account.error));
  return card;
@@ -97,7 +100,7 @@ async function loadAccounts(status,files){
  for(const a of status.accounts||[]){
   const auth=files.find(f=>f.provider==='codex'&&[f.name,f.id].includes(a.auth_id));if(auth)used.add(auth);
   const n=(counts.get('Codex')||0)+1;counts.set('Codex',n);
-  accounts.push({provider:'Codex',name:a.alias||'Codex account '+String(n).padStart(2,'0'),identity:masked(auth&&(auth.email||auth.account))||'Codex · OAuth',disabled:!!(auth&&auth.disabled),short:codexWindow(a.five_hour),long:codexWindow(a.long_window)});
+  accounts.push({provider:'Codex',name:a.alias||'Codex account '+String(n).padStart(2,'0'),identity:masked(auth&&(auth.email||auth.account))||'Codex · OAuth',disabled:!!(auth&&auth.disabled),short:codexWindow(a.five_hour),long:codexWindow(a.long_window),manualResets:codexResetCount(a.reset_credits_available_count)});
  }
  for(const f of files){
   if(used.has(f))continue;

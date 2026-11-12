@@ -55,6 +55,7 @@ namespace ProxyDeck
                     if (!DateTimeOffset.TryParse(Json.Str(grant, key), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out date)) return null;
                     if (key == "starts_at" ? now < date : now >= date) available = false;
                 }
+                if (available && fableOnly && !(Json.Get(grant, "gives_back_weekly") is bool)) return null;
                 if (available && (!fableOnly || Json.Bool(grant, "gives_back_weekly"))) total += left;
                 if (total > Int32.MaxValue) return null;
             }

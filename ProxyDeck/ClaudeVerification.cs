@@ -14,6 +14,8 @@ namespace ProxyDeck
             internal Dictionary<string, object> Usage = Json.Parse("{\"five_hour\":{\"utilization\":0,\"resets_at\":null},\"seven_day\":{\"utilization\":20}}");
             internal int Generations, UsageReads;
             internal bool FailGeneration, RetryChain, MissingModel;
+            internal object ForcePrefix = true;
+            internal string CredentialPrefix = ClaudeWarmup.Prefix;
             internal string UsageUrl, UsageAgent;
             internal Task<Dictionary<string, object>> Send(string path, HttpMethod method, object payload, bool access)
             {
@@ -21,6 +23,10 @@ namespace ProxyDeck
                     return Task.FromResult(Json.Parse("{\"files\":[{\"name\":\"claude-test.json\",\"auth_index\":\"test\",\"provider\":\"claude\",\"request_retry\":0}]}"));
                 if (path == Paths.Fleet + "/settings")
                     return Task.FromResult(new Dictionary<string, object> { { "retry_enabled", RetryChain } });
+                if (path == "/v0/management/force-model-prefix")
+                    return Task.FromResult(new Dictionary<string, object> { { "force-model-prefix", ForcePrefix } });
+                if (path == "/v0/management/auth-files/download?name=claude-test.json")
+                    return Task.FromResult(new Dictionary<string, object> { { "type", "claude" }, { "prefix", CredentialPrefix }, { "request_retry", 0 } });
                 if (path == "/v1/models")
                     return Task.FromResult(Json.Parse(MissingModel ? "{\"data\":[]}" : "{\"data\":[{\"id\":\"manual-claude/claude-opus-5-5\",\"owned_by\":\"anthropic\"}]}"));
                 if (path == "/v0/management/api-call")
@@ -89,10 +95,43 @@ namespace ProxyDeck
             worker = new ClaudeWarmup(path, fake.Send);
             await worker.Tick(true, 60, now.AddMinutes(20));
             check(fake.Generations == 1, "Claude ambiguous generation timeout never causes an automatic retry", passed);
+            fake = new Fake { FailGeneration = true };
+            Json.Map(fake.Usage["five_hour"])["resets_at"] = now.AddMinutes(-1).ToString("o");
+            path = Path.Combine(root, "claude-timeout-boundary.json"); worker = new ClaudeWarmup(path, fake.Send);
+            await worker.Tick(true, 60, now);
+            Json.Map(fake.Usage["five_hour"])["resets_at"] = null;
+            worker = new ClaudeWarmup(path, fake.Send);
+            await worker.Tick(true, 60, now.AddMinutes(20));
+            check(fake.Generations == 1, "Claude expired-to-idle usage cannot repeat an ambiguous attempt after restart", passed);
+            fake = new Fake { FailGeneration = true };
+            path = Path.Combine(root, "claude-timeout-idle.json"); worker = new ClaudeWarmup(path, fake.Send);
+            await worker.Tick(true, 60, now);
+            Json.Map(fake.Usage["five_hour"])["resets_at"] = now.AddMinutes(-1).ToString("o");
+            worker = new ClaudeWarmup(path, fake.Send);
+            await worker.Tick(true, 60, now.AddMinutes(20));
+            check(fake.Generations == 1, "Claude idle-to-expired usage cannot repeat an ambiguous attempt after restart", passed);
+            fake = new Fake();
+            path = Path.Combine(root, "claude-legacy-idle.json");
+            File.WriteAllText(path, new JavaScriptSerializer().Serialize(new { attempted_window = "claude-test.json:idle:", attempted_at = now.ToString("o") }));
+            worker = new ClaudeWarmup(path, fake.Send);
+            await worker.Tick(true, 60, now.AddMinutes(20));
+            check(fake.Generations == 0, "existing durable idle reservations remain effective after upgrading", passed);
             fake = new Fake { RetryChain = true };
             worker = new ClaudeWarmup(Path.Combine(root, "claude-chain.json"), fake.Send);
             await worker.Tick(true, 60, now);
             check(fake.Generations == 0, "Claude warmup refuses an enabled model fallback chain", passed);
+            foreach (object force in new object[] { false, null, "true" })
+            {
+                fake = new Fake { ForcePrefix = force };
+                path = Path.Combine(root, "claude-prefix-" + Guid.NewGuid().ToString("N") + ".json");
+                worker = new ClaudeWarmup(path, fake.Send);
+                await worker.Tick(true, 60, now);
+                check(fake.Generations == 0, "Claude warmup refuses disabled or unknown strict-prefix enforcement", passed);
+            }
+            fake = new Fake { CredentialPrefix = "other-account" };
+            worker = new ClaudeWarmup(Path.Combine(root, "claude-wrong-prefix.json"), fake.Send);
+            await worker.Tick(true, 60, now);
+            check(fake.Generations == 0, "Claude warmup verifies the selected credential prefix even when the model catalog matches", passed);
             fake = new Fake { MissingModel = true };
             worker = new ClaudeWarmup(Path.Combine(root, "claude-model.json"), fake.Send);
             await worker.Tick(true, 60, now);
@@ -137,6 +176,13 @@ namespace ProxyDeck
                 "expired, paused and future grants do not inflate the available reset inventory", passed);
             check(!ClaudeUsage.Resets(Json.Parse("{\"cedar_ember\":{\"eligible\":true,\"grants\":[{\"resets_left\":-1,\"paused\":false}]}}"), boundary, true).HasValue,
                 "malformed reset grants remain unknown instead of claiming zero rights", passed);
+            foreach (object classification in new object[] { null, "true" })
+            {
+                var grant = new Dictionary<string, object> { { "resets_left", 2 }, { "paused", false }, { "gives_back_weekly", classification } };
+                var unknown = Json.Parse(new JavaScriptSerializer().Serialize(new { cedar_ember = new { eligible = true, grants = new[] { grant } } }));
+                check(ClaudeUsage.Resets(unknown, boundary, false) == 2 && !ClaudeUsage.Resets(unknown, boundary, true).HasValue,
+                    "unknown Fable grant classification preserves the known total without claiming zero Fable resets", passed);
+            }
         }
     }
 }
