@@ -17,7 +17,7 @@ namespace ProxyDeck
         readonly Button next = new Button(), back = new Button();
         readonly TextBox directory = new TextBox(), key = new TextBox();
         readonly NumericUpDown port = new NumericUpDown(), delay = new NumericUpDown();
-        readonly CheckBox remote = new CheckBox(), warm = new CheckBox(), exclusive = new CheckBox(), manage = new CheckBox(), weekly = new CheckBox();
+        readonly CheckBox remote = new CheckBox(), warm = new CheckBox(), exclusive = new CheckBox(), manage = new CheckBox(), weekly = new CheckBox(), claudeWarm = new CheckBox();
         readonly Label feedback = new Label();
         CancellationTokenSource cancellation;
         int page;
@@ -42,6 +42,7 @@ namespace ProxyDeck
             delay.Minimum = 1; delay.Maximum = 15; delay.Value = options.ResetDelaySeconds / 60;
             remote.Checked = options.UseTailscale || enableTailscale; warm.Checked = options.AutoWarm; exclusive.Checked = options.ExclusiveTailscale; manage.Checked = options.ManageExistingProxy;
             weekly.Checked = options.PreferWeeklyQuota;
+            claudeWarm.Checked = options.ClaudeAutoWarm;
             remote.CheckedChanged += (s, e) => exclusive.Enabled = remote.Checked;
             FormClosing += (s, e) => { if (busy) { e.Cancel = true; cancellation.Cancel(); feedback.Text = "Canceling the download; waiting for the current setup step to finish…"; } };
             Render();
@@ -88,7 +89,9 @@ namespace ProxyDeck
                 TextAt("Recommended: check 1 minute after reset; send one tiny request if needed.\nGive all CLIProxy accounts the same priority to monitor them together.\nRequests may use a small amount of quota. The system must be running.", 313, 61, false);
                 Field(delay, 376, 68); var label = TextAt("min after reset · recommended: 1", 379, 24, false); label.Left = 82; label.Width = 440;
                 Toggle(weekly, "Prefer weekly quota; keep the active account when close", 426);
-                TextAt("Within 10 percentage points, keep the active account until its 5-hour\nquota runs out or it becomes unavailable. Updates every 30–90 seconds.\nKeep all Codex accounts at the same CLIProxy priority, normally 0.", 466, 65, false);
+                TextAt("Within 10 percentage points, keep the active account until its 5-hour\nquota runs out or it becomes unavailable. Routing checks every 90 seconds.\nKeep all Codex accounts at the same CLIProxy priority, normally 0.", 466, 65, false);
+                Toggle(claudeWarm, "Include an existing manual-claude account in Auto Warm", 550);
+                TextAt("Requires one Claude OAuth account with prefix manual-claude and\nrequest_retry set to 0. Uses Opus 5.5 at high effort; never a Codex fallback.\nThe main Auto Warm switch controls both providers.", 590, 65, false);
                 next.Text = "Review setup";
             }
             else if (page == 2)
@@ -158,6 +161,7 @@ namespace ProxyDeck
             options.UseTailscale = remote.Checked; options.ExclusiveTailscale = remote.Checked && exclusive.Checked;
             options.AutoWarm = warm.Checked; options.ResetDelaySeconds = (int)delay.Value * 60; options.ManageExistingProxy = manage.Checked;
             options.PreferWeeklyQuota = weekly.Checked;
+            options.ClaudeAutoWarm = claudeWarm.Checked;
             if (key.Text.Length > 0) options.ProtectedManagementKey = SettingsStore.Protect(key.Text.Trim());
             page = 3; busy = true; cancellation = new CancellationTokenSource(); Render();
             bool wasRunning = controller.View.Desired;

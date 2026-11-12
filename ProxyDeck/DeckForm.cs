@@ -61,14 +61,14 @@ namespace ProxyDeck
 
     internal sealed class DeckForm : Form
     {
-        const float DesignWidth = 360, CardHeight = 144, CardStride = 154, AccountsTop = 172, Footer = 214;
+        const float DesignWidth = 360, MaxPanelHeight = 640, CardHeight = 128, CardStride = 138, AccountsTop = 156, Footer = 184;
         readonly Controller controller;
         readonly Dictionary<string, RectangleF> hits = new Dictionary<string, RectangleF>();
         readonly ToolTip tips = new ToolTip { InitialDelay = 350, AutoPopDelay = 10000 };
-        float zoom = 1, scroll;
+        float zoom = 1, scroll, scrollGrab;
         string hover = "", toast = "";
         DateTimeOffset toastUntil;
-        bool refreshing;
+        bool refreshing, draggingScroll;
         internal bool Preview;
         internal event Action ContextRequested;
         internal event Action TailscaleSetupRequested;
@@ -93,11 +93,26 @@ namespace ProxyDeck
         internal void SetSizeAndPosition()
         {
             Rectangle work = Screen.FromPoint(Cursor.Position).WorkingArea;
-            float content = Math.Max(1, controller.View.Accounts.Count) * CardStride;
-            int height = (int)Math.Ceiling(Math.Min(AccountsTop + content + Footer, work.Height / zoom - 24) * zoom);
-            Size = new Size((int)(DesignWidth * zoom), Math.Max((int)(430 * zoom), height));
+            float height = Math.Min(AccountsTop + AccountContentHeight + Footer, MaxPanelHeight);
+            height = Math.Min(height, Math.Max(1, work.Height / zoom - 24));
+            Size = new Size((int)(DesignWidth * zoom), (int)Math.Ceiling(height * zoom));
             Location = new Point(work.Right - Width - (int)(12 * zoom), work.Bottom - Height - (int)(12 * zoom));
         }
+        internal static bool HasFable(Account account) { return account.FableWeekly != null || account.FableManualResets.HasValue; }
+        internal static float AccountHeight(Account account) { return CardHeight + (HasFable(account) ? 48 : 0); }
+        float AccountContentHeight { get { return controller.View.Accounts.Count == 0 ? CardHeight : controller.View.Accounts.Sum(a => AccountHeight(a) + CardStride - CardHeight) - (CardStride - CardHeight); } }
+        float AccountViewport { get { return Math.Max(1, ClientSize.Height / zoom - AccountsTop - Footer); } }
+        float ScrollLimit { get { return Math.Max(0, AccountContentHeight - AccountViewport); } }
+        RectangleF ScrollThumb
+        {
+            get
+            {
+                float viewport = AccountViewport, thumb = Math.Min(viewport, Math.Max(32, viewport * viewport / AccountContentHeight));
+                float offset = scroll / Math.Max(1, ScrollLimit) * (viewport - thumb);
+                return new RectangleF(349, AccountsTop + offset, 4, thumb);
+            }
+        }
+        void ScrollTo(float value) { scroll = Math.Max(0, Math.Min(value, ScrollLimit)); Invalidate(); }
         internal void UpdateView()
         {
             if (IsDisposed) return;
@@ -126,7 +141,15 @@ namespace ProxyDeck
         }
         internal void Toast(string text) { toast = text; toastUntil = DateTimeOffset.Now.AddSeconds(7); Invalidate(); }
         internal void ShowPanel() { SetSizeAndPosition(); Show(); Activate(); Invalidate(); }
-        protected override void OnKeyDown(KeyEventArgs e) { if (e.KeyCode == Keys.Escape) Hide(); base.OnKeyDown(e); }
+        protected override void OnKeyDown(KeyEventArgs e)
+        {
+            if (e.KeyCode == Keys.Escape) Hide();
+            else if (e.KeyCode == Keys.PageDown) { ScrollTo(scroll + AccountViewport - 20); e.Handled = true; }
+            else if (e.KeyCode == Keys.PageUp) { ScrollTo(scroll - AccountViewport + 20); e.Handled = true; }
+            else if (e.KeyCode == Keys.Home) { ScrollTo(0); e.Handled = true; }
+            else if (e.KeyCode == Keys.End) { ScrollTo(ScrollLimit); e.Handled = true; }
+            base.OnKeyDown(e);
+        }
         protected override void OnFormClosing(FormClosingEventArgs e)
         {
             if (e.CloseReason == CloseReason.UserClosing) { e.Cancel = true; Hide(); } else base.OnFormClosing(e);
@@ -144,12 +167,12 @@ namespace ProxyDeck
         void DrawButton(Graphics g, string id, string text, float x, float y, float width, bool danger)
         {
             var c = Hovered(id, danger ? Color.FromArgb(37, 23, 29) : Color.FromArgb(27, 31, 38), danger ? Color.FromArgb(58, 29, 37) : Color.FromArgb(38, 44, 53));
-            Art.Box(g, new RectangleF(x, y, width, 36), c, 8, true);
+            Art.Box(g, new RectangleF(x, y, width, 32), c, 8, true);
             using (var font = new Font("Segoe UI", 12, FontStyle.Bold, GraphicsUnit.Pixel))
             using (var brush = new SolidBrush(danger ? Color.FromArgb(249, 139, 151) : Art.Text))
             using (var format = new StringFormat { Alignment = StringAlignment.Center, LineAlignment = StringAlignment.Center })
-                g.DrawString(text, font, brush, new RectangleF(x, y, width, 36), format);
-            Hit(id, x, y, width, 36);
+                g.DrawString(text, font, brush, new RectangleF(x, y, width, 32), format);
+            Hit(id, x, y, width, 32);
         }
         void Dot(Graphics g, float x, float y, Color color, float size)
         { using (var b = new SolidBrush(Color.FromArgb(22, color))) g.FillEllipse(b, x - 3, y - 3, size + 6, size + 6); using (var b = new SolidBrush(color)) g.FillEllipse(b, x, y, size, size); }
@@ -172,21 +195,35 @@ namespace ProxyDeck
         }
         void DrawAccount(Graphics g, Account a, float y)
         {
-            Art.Box(g, new RectangleF(16, y, 328, CardHeight), Art.Card, 10, true);
+            Art.Box(g, new RectangleF(16, y, 328, AccountHeight(a)), Art.Card, 10, true);
             Dot(g, 30, y + 19, controller.View.Desired ? a.Available ? Art.Mint : Art.Red : Art.Muted, 5);
             Art.Label(g, a.Name, 43, y + 11, 175, 13, Art.Text, true, false);
             Art.Label(g, a.Email, 29, y + 31, 202, 11, Art.Muted, false, false);
             Art.Label(g, "5 HOURS", 253, y + 10, 77, 8, Art.Muted, true, true);
             Art.Label(g, Percent(a.Short), 240, y + 22, 90, 25, QuotaColor(a.Short), true, true);
-            Art.Label(g, "5-hour remaining", 29, y + 61, 112, 10.5f, Art.Muted, false, false);
-            Art.Label(g, ResetLabel(a.Short), 137, y + 61, 193, 10.5f, Art.Muted, false, true);
-            Bar(g, 29, y + 81, 301, a.Short, false);
+            Art.Label(g, "5-hour remaining", 29, y + 55, 112, 10.5f, Art.Muted, false, false);
+            Art.Label(g, ResetLabel(a.Short), 137, y + 55, 193, 10.5f, Art.Muted, false, true);
+            Bar(g, 29, y + 74, 301, a.Short, false);
             string kind = a.Long.Kind == "monthly" ? "Monthly" : "Weekly";
-            Art.Label(g, kind, 29, y + 97, 130, 11, Art.Muted, false, false);
-            Art.Label(g, Percent(a.Long), 242, y + 95, 88, 13, Art.Text, true, true);
-            Bar(g, 29, y + 119, 301, a.Long, true);
+            Art.Label(g, kind, 29, y + 85, 130, 11, Art.Muted, false, false);
+            Art.Label(g, Percent(a.Long), 242, y + 83, 88, 13, Art.Text, true, true);
+            Bar(g, 29, y + 106, 301, a.Long, true);
             string reset = a.Long.Reset.HasValue ? a.Long.Reset.Value.ToLocalTime().ToString("dd MMM · HH:mm", System.Globalization.CultureInfo.GetCultureInfo("en-US")) : "Reset time unavailable";
-            Art.Label(g, reset, 29, y + 126, 301, 8.5f, Art.Muted, false, true);
+            if (a.SupportsManualResets)
+                Art.Label(g, "Manual resets · " + (a.ManualResets.HasValue ? a.ManualResets.Value.ToString() : "—"), 29, y + 110, 122, 9.5f,
+                    a.ManualResets.GetValueOrDefault() > 0 ? Art.Mint : Art.Muted, true, false);
+            Art.Label(g, reset, a.SupportsManualResets ? 153 : 29, y + 112, a.SupportsManualResets ? 177 : 301, 8.5f, Art.Muted, false, true);
+            if (HasFable(a))
+            {
+                var fable = a.FableWeekly ?? new Quota();
+                Art.Label(g, "Fable weekly", 29, y + 133, 166, 11, Art.Muted, false, false);
+                Art.Label(g, Percent(fable), 242, y + 131, 88, 13, Art.Text, true, true);
+                Bar(g, 29, y + 153, 301, fable, true);
+                Art.Label(g, "Fable resets · " + (a.FableManualResets.HasValue ? a.FableManualResets.Value.ToString() : "—"), 29, y + 158, 122, 9.5f,
+                    a.FableManualResets.GetValueOrDefault() > 0 ? Art.Mint : Art.Muted, true, false);
+                string date = fable.Reset.HasValue ? fable.Reset.Value.ToLocalTime().ToString("dd MMM · HH:mm", System.Globalization.CultureInfo.GetCultureInfo("en-US")) : "Reset time unavailable";
+                Art.Label(g, date, 153, y + 160, 177, 8.5f, Art.Muted, false, true);
+            }
         }
         protected override void OnPaint(PaintEventArgs e)
         {
@@ -204,37 +241,50 @@ namespace ProxyDeck
             Hit("hide", 314, 17, 27, 27);
             using (var pen = new Pen(Art.Edge)) g.DrawLine(pen, 16, 62, 344, 62);
 
-            Art.Box(g, new RectangleF(16, 76, 328, 62), Art.Card, 10, true);
+            Art.Box(g, new RectangleF(16, 70, 328, 54), Art.Card, 10, true);
             string state = view.Busy ? "STARTING" : view.Ready ? "SYSTEM READY" : view.Desired ? "needs attention" : "SYSTEM STOPPED";
-            Art.Label(g, state, 28, 87, 277, 8.5f, view.Ready ? Art.Mint : view.Busy ? Art.Amber : Art.Muted, true, false);
-            Dot(g, 29, 116, view.ProxyReady ? Art.Mint : Art.Muted, 5);
-            Art.Label(g, "CLIProxy", 42, 109, 88, 11.5f, Art.Text, false, false);
-            Art.Label(g, view.ProxyReady ? "ready" : "off", 108, 111, 48, 10, Art.Muted, false, true);
-            using (var pen = new Pen(Art.Edge)) g.DrawLine(pen, 176, 107, 176, 126);
-            if (hover == "tailscale") Art.Box(g, new RectangleF(183, 104, 152, 28), Color.FromArgb(29, 35, 42), 6, false);
-            Dot(g, 192, 116, view.NetworkReady ? Art.Mint : Art.Muted, 5);
-            Art.Label(g, "Tailscale", 205, 109, 65, 11.5f, Art.Text, false, false);
-            DrawSwitch(g, "tailscale", SettingsStore.Current.UseTailscale, 299, 111);
-            hits["tailscale"] = new RectangleF(183, 103, 152, 30);
-            Art.Label(g, "ACCOUNTS", 19, 152, 140, 9, Art.Muted, true, false);
-            Art.Label(g, view.Accounts.Count + (view.Accounts.Count == 1 ? " account" : " accounts"), 222, 151, 120, 10, Art.Muted, false, true);
+            Art.Label(g, state, 28, 79, 277, 8.5f, view.Ready ? Art.Mint : view.Busy ? Art.Amber : Art.Muted, true, false);
+            Dot(g, 29, 108, view.ProxyReady ? Art.Mint : Art.Muted, 5);
+            Art.Label(g, "CLIProxy", 42, 101, 88, 11.5f, Art.Text, false, false);
+            Art.Label(g, view.ProxyReady ? "ready" : "off", 108, 103, 48, 10, Art.Muted, false, true);
+            using (var pen = new Pen(Art.Edge)) g.DrawLine(pen, 176, 99, 176, 118);
+            if (hover == "tailscale") Art.Box(g, new RectangleF(183, 96, 152, 28), Color.FromArgb(29, 35, 42), 6, false);
+            Dot(g, 192, 108, view.NetworkReady ? Art.Mint : Art.Muted, 5);
+            Art.Label(g, "Tailscale", 205, 101, 65, 11.5f, Art.Text, false, false);
+            DrawSwitch(g, "tailscale", SettingsStore.Current.UseTailscale, 299, 103);
+            hits["tailscale"] = new RectangleF(183, 95, 152, 28);
+            Art.Label(g, "ACCOUNTS", 19, 136, 140, 9, Art.Muted, true, false);
+            Art.Label(g, view.Accounts.Count + (view.Accounts.Count == 1 ? " account" : " accounts"), 222, 135, 120, 10, Art.Muted, false, true);
 
-            float viewport = height - AccountsTop - Footer;
-            float total = Math.Max(1, view.Accounts.Count) * CardStride;
-            scroll = Math.Max(0, Math.Min(scroll, Math.Max(0, total - viewport)));
+            float viewport = AccountViewport;
+            scroll = Math.Max(0, Math.Min(scroll, ScrollLimit));
             var saved = g.Save(); g.SetClip(new RectangleF(12, AccountsTop - 1, 336, viewport));
             if (view.Accounts.Count == 0)
             {
-                Art.Box(g, new RectangleF(16, AccountsTop, 328, 144), Art.Card, 10, true);
-                Art.Label(g, view.Busy ? "Preparing your system…" : view.Desired ? "Waiting for account data" : "Ready in one click", 30, AccountsTop + 28, 300, 15, Art.Text, true, false);
+                Art.Box(g, new RectangleF(16, AccountsTop, 328, CardHeight), Art.Card, 10, true);
+                Art.Label(g, view.Busy ? "Preparing your system…" : view.Desired ? "Refresh to load account limits" : "Ready in one click", 30, AccountsTop + 28, 300, 15, Art.Text, true, false);
                 Art.Label(g, view.Busy ? view.Stage : view.Desired ? "Select Refresh to check your accounts." : "Start to prepare your connection and accounts.", 30, AccountsTop + 59, 295, 11, Art.Muted, false, false);
             }
-            for (int i = 0; i < view.Accounts.Count; i++) DrawAccount(g, view.Accounts[i], AccountsTop + i * CardStride - scroll);
-            g.Restore(saved);
-            if (total > viewport)
+            float accountY = AccountsTop - scroll;
+            for (int i = 0; i < view.Accounts.Count; i++)
             {
-                float thumb = Math.Max(20, viewport * viewport / total), offset = scroll / Math.Max(1, total - viewport) * (viewport - thumb);
-                Art.Box(g, new RectangleF(348, AccountsTop + offset, 2, thumb), Color.FromArgb(70, 78, 90), 1, false);
+                float y = accountY;
+                if (y > AccountsTop + viewport) break;
+                if (y + AccountHeight(view.Accounts[i]) >= AccountsTop) DrawAccount(g, view.Accounts[i], y);
+                accountY += AccountHeight(view.Accounts[i]) + CardStride - CardHeight;
+            }
+            if (scroll > 0)
+                using (var fade = new LinearGradientBrush(new RectangleF(12, AccountsTop - 1, 336, 16), Art.Back, Color.FromArgb(0, Art.Back), LinearGradientMode.Vertical))
+                    g.FillRectangle(fade, 12, AccountsTop - 1, 336, 16);
+            if (scroll < ScrollLimit)
+                using (var fade = new LinearGradientBrush(new RectangleF(12, AccountsTop + viewport - 16, 336, 16), Color.FromArgb(0, Art.Back), Art.Back, LinearGradientMode.Vertical))
+                    g.FillRectangle(fade, 12, AccountsTop + viewport - 16, 336, 16);
+            g.Restore(saved);
+            if (ScrollLimit > 0)
+            {
+                Hit("scroll", 344, AccountsTop, 12, viewport);
+                Art.Box(g, new RectangleF(350, AccountsTop, 2, viewport), Art.Edge, 1, false);
+                Art.Box(g, ScrollThumb, draggingScroll || hover == "scroll" ? Color.FromArgb(113, 145, 143) : Color.FromArgb(64, 77, 83), 2, false);
             }
 
             float footer = height - Footer + 3;
@@ -245,10 +295,10 @@ namespace ProxyDeck
             Art.Label(g, "Auto Warm after reset", 41, footer + 7, 218, 10.5f, Art.Muted, false, false);
             DrawSwitch(g, "warmup", warmup, 299, footer + 7);
             hits["warmup"] = new RectangleF(16, footer, 328, 31);
-            DrawButton(g, "panel", "Quota dashboard", 16, footer + 42, 159, false);
-            DrawButton(g, "key", "Copy management key", 185, footer + 42, 159, false);
-            DrawButton(g, "proxy-dashboard", "CLIProxy dashboard", 16, footer + 88, 328, false);
-            DrawButton(g, "power", view.Busy ? view.Stage + "…" : view.Desired ? "Stop system" : "Start system", 16, footer + 134, 328, view.Desired);
+            DrawButton(g, "panel", "Quota dashboard", 16, footer + 40, 159, false);
+            DrawButton(g, "key", "Copy management key", 185, footer + 40, 159, false);
+            DrawButton(g, "proxy-dashboard", "CLIProxy dashboard", 16, footer + 80, 328, false);
+            DrawButton(g, "power", view.Busy ? view.Stage + "…" : view.Desired ? "Stop system" : "Start system", 16, footer + 120, 328, view.Desired);
             string age = "Quota data has not been loaded";
             if (view.ReadAt.HasValue)
             {
@@ -258,28 +308,61 @@ namespace ProxyDeck
             }
             if (toastUntil > DateTimeOffset.Now) age = toast;
             else if (hasError) age = view.Error;
-            Art.Label(g, age, 18, footer + 182, 285, 9, hasError ? Art.Amber : Art.Muted, false, false);
-            Art.Label(g, "•••", 312, footer + 175, 29, 15, Art.Muted, true, true); Hit("menu", 310, footer + 173, 34, 28);
+            Art.Label(g, age, 18, footer + 162, 285, 9, hasError ? Art.Amber : Art.Muted, false, false);
+            Art.Label(g, "•••", 312, footer + 153, 29, 15, Art.Muted, true, true); Hit("menu", 310, footer + 151, 34, 28);
         }
         protected override void OnMouseMove(MouseEventArgs e)
         {
             base.OnMouseMove(e); var point = new PointF(e.X / zoom, e.Y / zoom);
+            if (draggingScroll)
+            {
+                float travel = AccountViewport - ScrollThumb.Height;
+                ScrollTo((point.Y - AccountsTop - scrollGrab) / Math.Max(1, travel) * ScrollLimit);
+                return;
+            }
             string next = hits.FirstOrDefault(hit => hit.Value.Contains(point)).Key ?? "";
             Cursor = next.Length > 0 ? Cursors.Hand : Cursors.Default;
             if (next != hover)
             {
                 hover = next;
-                string hint = next == "warmup" ? "Click to turn Auto Warm on or off. Changes are saved immediately." :
+                string hint = next == "scroll" ? "Scroll or drag to view more accounts." :
+                    next == "refresh" ? "Refresh account limits. Displayed percentages only update when you click." :
+                    next == "warmup" ? "Click to turn Auto Warm on or off. Changes are saved immediately." :
                     next == "tailscale" ? SettingsStore.Current.ExclusiveTailscale ? "Click to start or stop Tailscale. The local proxy stays running." :
                     "Click to enable or disable this app's phone access. Other Tailscale connections stay running." : controller.View.Error;
                 tips.SetToolTip(this, hint); Invalidate();
             }
         }
         protected override void OnMouseLeave(EventArgs e) { hover = ""; Invalidate(); base.OnMouseLeave(e); }
-        protected override void OnMouseWheel(MouseEventArgs e) { scroll -= e.Delta / 3f; Invalidate(); base.OnMouseWheel(e); }
+        protected override void OnMouseWheel(MouseEventArgs e)
+        {
+            if (e.Y / zoom >= AccountsTop && e.Y / zoom < AccountsTop + AccountViewport) ScrollTo(scroll - e.Delta / 2f);
+            base.OnMouseWheel(e);
+        }
+        protected override void OnMouseDown(MouseEventArgs e)
+        {
+            base.OnMouseDown(e);
+            var point = new PointF(e.X / zoom, e.Y / zoom);
+            RectangleF track;
+            if (e.Button != MouseButtons.Left || !hits.TryGetValue("scroll", out track) || !track.Contains(point)) return;
+            var thumb = ScrollThumb;
+            if (!thumb.Contains(point))
+            {
+                float travel = AccountViewport - thumb.Height;
+                ScrollTo((point.Y - AccountsTop - thumb.Height / 2) / Math.Max(1, travel) * ScrollLimit);
+            }
+            scrollGrab = Math.Max(0, Math.Min(ScrollThumb.Height, point.Y - ScrollThumb.Top));
+            draggingScroll = true; Capture = true; Invalidate();
+        }
+        protected override void OnMouseCaptureChanged(EventArgs e)
+        {
+            base.OnMouseCaptureChanged(e);
+            if (!Capture) { draggingScroll = false; Invalidate(); }
+        }
         protected override async void OnMouseUp(MouseEventArgs e)
         {
             base.OnMouseUp(e); if (e.Button != MouseButtons.Left) return;
+            if (draggingScroll) { draggingScroll = false; Capture = false; Invalidate(); return; }
             var point = new PointF(e.X / zoom, e.Y / zoom);
             string id = hits.FirstOrDefault(hit => hit.Value.Contains(point)).Key;
             await ActivateAsync(id);

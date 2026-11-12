@@ -73,6 +73,18 @@ tray window is not required. You still need to sign in to Tailscale and enable
 HTTPS/Serve for your tailnet. The wizard links to those steps; it does not
 create accounts on your behalf. Sign in to the same tailnet on your phone.
 **Copy phone link** discovers this computer's current address automatically.
+The phone link opens Proxy Deck's combined quota page for every connected
+Codex and Claude account, including Claude accounts outside Auto Warm. Paste
+the CLIProxy management key from **Copy management key**, then select
+**Refresh limits**. The page keeps the key in that tab's session only, stops
+after a rejected key, and never polls or sends chat requests. Unavailable
+accounts remain visible with a quota status instead of disappearing.
+
+The existing phone URL is preserved. Proxy Deck adds one specific Tailscale
+Serve path for its embedded page; other requests still go to CLIProxy.
+The page listener binds only to loopback, uses an available local port, and
+stops with the managed system. No separate service or administrator setup is
+needed for the listener.
 
 CLIProxy remains bound to loopback. When Tailscale is selected for a new setup,
 only loopback proxy headers are trusted and remote management still requires
@@ -100,7 +112,7 @@ quota remaining. Fleet Manager still skips exhausted or blocked accounts and
 handles immediate failover between Proxy Deck polls.
 
 Proxy Deck updates Fleet's plugin priorities using the latest cached quotas
-on each poll (30 seconds with the panel open, 90 seconds in the tray). Actual
+on each background maintenance poll (every 90 seconds). Actual
 quota freshness follows Fleet Manager's refresh schedule; this is not a live
 upstream quota reading for every request. Unknown, invalid, expired and monthly
 windows receive no weekly preference. With no safe selection, Fleet allows
@@ -134,6 +146,27 @@ under **Setup & components**.
 
 ## Daily use
 
+### Optional Claude Auto Warm
+
+For an existing Claude OAuth account, assign the credential prefix
+`manual-claude`, set its `request_retry` to `0`, and enable **Include an existing
+manual-claude account in Auto Warm** in Setup. Exactly one enabled account with
+that prefix is required. The main **Auto Warm** switch controls both Codex and
+Claude. Claude quotas appear as a separate card in the tray panel.
+
+Claude usage is checked every five minutes while Proxy Deck is running. When
+the 5-hour window is inactive or has reset, and weekly quota is available,
+the worker sends one small request using
+`manual-claude/claude-opus-5-5(high)` and verifies usage afterward. The reset
+delay also applies to Claude. Attempts are reserved on disk before sending;
+failed or unverified attempts are not automatically repeated for that window.
+Unknown quota evidence and an enabled model retry chain prevent warmup.
+
+Outside this opt-in warmup, use Claude only by explicitly selecting that model.
+Keep **force-model-prefix** enabled so the prefixed credential cannot serve
+unprefixed requests, and do not alias GPT model names to Claude. Codex account
+scheduling remains in Codex Fleet Manager; Claude is never its fallback.
+
 - **Click the tray icon:** See each account's remaining 5-hour and weekly or
   monthly quota, along with reset times.
 - **Tray logo:** A red Proxy Deck logo while the system is enabled, gray when
@@ -147,9 +180,25 @@ under **Setup & components**.
   In shared mode it removes only this app's root Serve handler and leaves other
   Tailscale connections and paths running. If initial setup is required, the
   switch opens the setup wizard with Tailscale selected.
-- **Refresh:** Requests a quota check, at most once per minute while the panel
-  is open. With the panel hidden, local status is read every 90 seconds. The
-  footer shows how old the quota data is.
+- **Refresh:** Loads the displayed limits only when clicked. On startup, the
+  panel asks you to refresh; opening or leaving it visible does not update its
+  percentages. Codex upstream refresh requests are limited to once per minute;
+  Claude usage is read on each explicit refresh. Background routing and Auto
+  Warm keep running independently without changing the displayed snapshot.
+  The footer shows the age of that last snapshot.
+- **Account list:** The compact panel keeps its controls visible as accounts
+  are added. Scroll over the account cards or drag the slim scrollbar to see
+  more accounts. The scrollbar appears only when needed; Page Up, Page Down,
+  Home, and End also navigate the list.
+  Codex cards also show **Manual resets**, the remaining manual quota reset
+  credits reported by Fleet Manager. Zero means none remain; a dash means
+  the count is unavailable. The count updates with Refresh, and displaying it
+  never spends a reset credit.
+  Claude cards show the overall weekly allowance and a separate **Fable weekly**
+  allowance when Anthropic reports it. **Manual resets** counts saved reset
+  grants; **Fable resets** is the Fable-specific portion of that total. Paused,
+  expired and future grants are excluded. Viewing these counts never redeems
+  a grant. Claude data is refreshed with the same explicit Refresh button.
 - **Quota dashboard:** Opens Fleet Manager's detailed quota dashboard. Use
   **Copy management key** if it asks for authentication.
 - **CLIProxy dashboard:** Opens CLIProxy's management panel at the configured
@@ -199,7 +248,7 @@ account. The script is included in the ZIP and installed app folder.
 
 | Problem | What to check |
 | --- | --- |
-| Port already in use | Close the other proxy launcher or choose a free port. The wizard updates `server.port` in an existing v8 `config.yaml`. For legacy configurations, match the port manually before applying setup. |
+| API port unavailable on 127.0.0.1 | Close the other local server or choose a free API port. Tailscale Serve may use the same port on its own network address; Proxy Deck checks the loopback endpoint separately. The wizard updates `server.port` in an existing v8 `config.yaml`. For legacy configurations, match the port manually before applying setup. |
 | Management key rejected | Enter the correct management key in the wizard. Automatic authentication retries are paused after a rejection; use Refresh after correcting the key. |
 | No quotas displayed | Connect a Codex account and select Refresh. Check whether CLIProxy account priorities differ. |
 | Tailscale is connected but the phone dashboard fails | Use the same tailnet on your phone. Windows, CLIProxy, and HTTPS/Serve must be running and ready. |

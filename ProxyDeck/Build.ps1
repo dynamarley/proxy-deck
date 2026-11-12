@@ -8,6 +8,7 @@ $sources = @(Get-ChildItem -LiteralPath $PSScriptRoot -Filter '*.cs' -File | Sor
 $options = @('/nologo','/target:winexe','/platform:x64','/optimize+','/utf8output',('/win32manifest:' + (Join-Path $PSScriptRoot 'app.manifest')),('/out:' + $executable))
 $options += '/resource:' + (Join-Path $PSScriptRoot 'Uninstall.ps1') + ',ProxyDeck.Uninstall.ps1'
 $options += '/resource:' + (Join-Path $PSScriptRoot 'Restore-Autostart.ps1') + ',ProxyDeck.Restore-Autostart.ps1'
+$options += '/resource:' + (Join-Path $PSScriptRoot 'PhoneDashboard.html') + ',ProxyDeck.PhoneDashboard.html'
 $options += '/resource:' + (Join-Path (Split-Path $PSScriptRoot -Parent) 'README.md') + ',ProxyDeck.README.md'
 $options += '/resource:' + (Join-Path (Split-Path $PSScriptRoot -Parent) 'THIRD-PARTY-NOTICES.md') + ',ProxyDeck.THIRD-PARTY-NOTICES.md'
 $options += '/resource:' + (Join-Path (Split-Path $PSScriptRoot -Parent) 'LICENSE') + ',ProxyDeck.LICENSE'

@@ -1,0 +1,141 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>Account limits · Proxy Deck</title>
+<style>
+:root{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;color:#ebeff6;background:#0d0f13;font-synthesis:none;color-scheme:dark}*{box-sizing:border-box}body{margin:0;padding:28px 18px max(24px,env(safe-area-inset-bottom))}main{max-width:850px;margin:auto}header{display:flex;align-items:center;gap:12px;padding-bottom:23px;border-bottom:1px solid #242931}.mark{color:#f64f63;font-size:28px;font-weight:900;line-height:1;transform:rotate(-12deg)}.brand{font-size:13px;font-weight:750;letter-spacing:.08em}.private{margin-left:auto;font-size:10px;letter-spacing:.07em;color:#2dd6a4;background:#111f1c;border:1px solid #224036;border-radius:20px;padding:6px 10px}h1{font-size:28px;letter-spacing:-.04em;margin:29px 0 8px}p{color:#929dae;font-size:13px;line-height:1.6;margin:0}.toolbar{display:flex;align-items:center;gap:12px;margin:23px 0 17px}.toolbar p{flex:1;font-size:12px}button,input{font:inherit}button{cursor:pointer;border:1px solid #303944;border-radius:9px;padding:10px 14px;background:#1b1f26;color:#ebeff6;font-size:12px;font-weight:650}button:hover{background:#262e38}button:focus-visible,input:focus-visible{outline:2px solid #2dd6a4;outline-offset:3px}button:disabled{opacity:.5;cursor:wait}.primary{background:#2dd6a4;border-color:#2dd6a4;color:#08251c;white-space:nowrap}.primary:hover{background:#53e2b9}.auth{background:#13161b;border:1px solid #242931;border-radius:12px;padding:17px;margin:20px 0}.auth label{display:block;font-size:12px;font-weight:650;margin-bottom:9px}.auth input{width:100%;padding:12px;border:1px solid #343c47;background:#0d0f13;border-radius:8px;color:#ebeff6;font-size:14px}.auth p{font-size:11px;margin-top:9px}.key{padding:4px 0;color:#929dae;background:none;border:0;font-size:11px}.key:hover{background:none;color:#ebeff6}.message{font-size:12px;color:#f4b556;margin:12px 0;line-height:1.6}.summary{display:flex;gap:8px;margin-bottom:14px}.chip{border:1px solid #293039;border-radius:20px;padding:5px 9px;font-size:10px;color:#a5afbd}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,310px),1fr));gap:13px}.card{background:#13161b;border:1px solid #242931;border-radius:13px;padding:17px;min-width:0}.account{display:flex;align-items:center;gap:8px}.dot{width:6px;height:6px;flex:none;border-radius:50%;background:#2dd6a4;box-shadow:0 0 0 3px #132d26}.dot.off{background:#929dae;box-shadow:none}.account h2{margin:0;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-size:13px;font-weight:650}.provider{margin-left:auto;color:#99a5b4;border:1px solid #303944;border-radius:5px;padding:3px 6px;font-size:9px;white-space:nowrap}.identity{font-size:11px;margin:8px 0 18px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.quota-head{display:flex;align-items:center;justify-content:space-between;margin:11px 0 8px;gap:8px}.quota-label{font-size:11px;color:#929dae}.percent{font-size:25px;font-weight:700;letter-spacing:-.04em;color:#2dd6a4}.weekly .percent{font-size:17px;letter-spacing:-.02em;color:#ebeff6}.bar{height:5px;background:#262b33;border-radius:4px;overflow:hidden}.fill{height:100%;border-radius:4px;background:#2dd6a4}.weekly .bar{height:3px}.reset{font-size:10px;margin:7px 0 15px;text-align:right;min-height:16px}.weekly .reset{margin-bottom:0}.empty{padding:35px 22px;border:1px dashed #303944;border-radius:13px;text-align:center}.empty strong{display:block;font-size:14px;margin-bottom:8px}footer{border-top:1px solid #242931;margin-top:24px;padding-top:15px;font-size:10px;color:#929dae;line-height:1.7}[hidden]{display:none!important}@media(max-width:400px){h1{font-size:25px}.toolbar{align-items:flex-start}.toolbar p{max-width:175px}.private{font-size:9px;padding:5px 7px}}
+</style>
+</head>
+<body><main>
+<header><span class="mark" aria-hidden="true">◢</span><span class="brand">PROXY DECK</span><span class="private">PRIVATE CONNECTION</span></header>
+<h1>All your account limits.</h1><p>Codex and Claude, together in one place.</p>
+<section class="auth" id="auth"><label for="management-key">CLIProxy management key</label><input id="management-key" type="password" autocomplete="off" spellcheck="false" placeholder="Paste your management key"><p>Use “Copy management key” in Proxy Deck. The key is kept in this tab's session only.</p></section>
+<div class="toolbar"><div style="flex:1"><p id="updated">Press Refresh to load account limits.</p><button class="key" id="change-key" hidden>Change management key</button></div><button class="primary" id="refresh">↻ &nbsp;Refresh limits</button></div>
+<p class="message" id="message" role="status" hidden></p><div class="summary" id="summary"></div>
+<div class="grid" id="accounts"><section class="empty"><strong>Your limits, when you need them.</strong><p>Refresh to check all connected accounts.<br>Nothing refreshes automatically.</p></section></div>
+<footer>Limits update only when you press Refresh. Checking usage does not send a chat request or change your active account. Auto Warm and account routing are managed separately by Proxy Deck.</footer>
+</main>
+<script>
+'use strict';
+const fleet='/v0/management/plugins/codex-fleet-manager';
+const $=id=>document.getElementById(id);
+let key='',busy=false,lastFresh=0;
+try{key=sessionStorage.getItem('proxy-deck-management-key')||'';}catch{}
+$('management-key').value=key;
+if(key){$('auth').hidden=true;$('change-key').hidden=false;}
+class AuthError extends Error{}
+async function api(path,body){
+ const abort=new AbortController(),timeout=setTimeout(()=>abort.abort(),20000);
+ try{
+  const options={method:body===undefined?'GET':'POST',headers:{Authorization:'Bearer '+key},cache:'no-store',signal:abort.signal,redirect:'error'};
+  if(body!==undefined){options.headers['Content-Type']='application/json';options.body=JSON.stringify(body);}
+  const response=await fetch(path,options);
+  if(response.status===401||response.status===403)throw new AuthError('Management key rejected or temporarily blocked. Correct the key before trying again.');
+  if(!response.ok)throw new Error('Quota service unavailable ('+response.status+').');
+  return await response.json();
+ }finally{clearTimeout(timeout);}
+}
+const number=value=>value!==null&&value!==undefined&&value!==''&&Number.isFinite(Number(value))?Number(value):null;
+function codexWindow(value){const q=value||{},n=number(q.remaining_percent);return{remaining:!q.missing&&n!==null?Math.min(100,Math.max(0,n)):null,reset:q.reset_at,kind:q.kind};}
+function claudeWindow(value){const q=value||{},n=number(q.utilization);return{remaining:n!==null&&n>=0&&n<=100?100-n:null,reset:q.resets_at};}
+function fableWindow(usage){
+ const limits=(Array.isArray(usage.limits)?usage.limits:[]).filter(q=>q?.kind==='weekly_scoped'&&(['fable','fable 5'].includes(String(q.scope?.model?.display_name||'').trim().toLowerCase())||String(q.scope?.model?.id||'').startsWith('claude-fable-'))).sort((a,b)=>Number(b.is_active===true)-Number(a.is_active===true));
+ for(const limit of limits){const n=number(limit.percent);if(n!==null&&n>=0&&n<=100)return{remaining:100-n,reset:limit.resets_at};}
+ return usage.seven_day_fable?claudeWindow(usage.seven_day_fable):limits.length?{remaining:null}:null;
+}
+function claudeResetCount(usage,fableOnly){
+ const status=usage.cedar_ember;if(typeof status?.eligible!=='boolean')return null;if(!status.eligible)return 0;
+ if(!Array.isArray(status.grants))return null;
+ let total=0;const now=Date.now(),seen=new Set();
+ for(const grant of status.grants){
+  if(!grant||!Number.isInteger(grant.resets_left)||grant.resets_left<0||typeof grant.paused!=='boolean')return null;
+  if(grant.id){if(seen.has(grant.id))return null;seen.add(grant.id);}
+  if(grant.resets_total!==null&&grant.resets_total!==undefined&&(!Number.isInteger(grant.resets_total)||grant.resets_total<grant.resets_left))return null;
+  let available=!grant.paused&&grant.resets_left>0;
+  for(const key of ['starts_at','ends_at']){if(grant[key]===null||grant[key]===undefined)continue;const date=Date.parse(grant[key]);if(!Number.isFinite(date))return null;if(key==='starts_at'?now<date:now>=date)available=false;}
+  if(available&&(!fableOnly||grant.gives_back_weekly===true))total+=grant.resets_left;
+  if(total>2147483647)return null;
+ }
+ return total;
+}
+function masked(value){const s=String(value||''),at=s.indexOf('@');return at>0?s.slice(0,Math.min(4,at))+'…'+s.slice(at):'';}
+function node(tag,className,text){const n=document.createElement(tag);if(className)n.className=className;if(text!==undefined)n.textContent=text;return n;}
+function resetText(value){if(!value)return 'Reset time unavailable';const date=new Date(value);if(!Number.isFinite(date.getTime()))return 'Reset time unavailable';return 'Resets '+new Intl.DateTimeFormat('en',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}).format(date);}
+function quotaCard(account){
+ const card=node('section','card'),head=node('div','account');
+ head.append(node('span','dot'+(account.disabled?' off':'')),node('h2','',account.name),node('span','provider',account.provider));
+ card.append(head,node('p','identity',account.identity||'Connected account'));
+ const windows=[['5-hour remaining',account.short,false],[account.long.kind==='monthly'?'Monthly remaining':'Weekly remaining',account.long,true]];
+ if(account.fable)windows.push(['Fable weekly remaining',account.fable,true]);
+ for(const [label,q,weekly] of windows){
+  const block=node('div',weekly?'weekly':''),row=node('div','quota-head'),percent=node('span','percent',q.remaining===null?'—':Math.floor(q.remaining)+'%');
+  const color=q.remaining===null?'#929dae':q.remaining<=0?'#f64f63':q.remaining<20?'#f4b556':'#2dd6a4';
+  if(!weekly||q.remaining===null||q.remaining<20)percent.style.color=color;
+  row.append(node('span','quota-label',label),percent);
+  const bar=node('div','bar'),fill=node('div','fill');fill.style.width=(q.remaining||0)+'%';fill.style.background=color;bar.append(fill);
+  bar.setAttribute('role','meter');bar.setAttribute('aria-label',label);bar.setAttribute('aria-valuemin','0');bar.setAttribute('aria-valuemax','100');if(q.remaining!==null)bar.setAttribute('aria-valuenow',String(q.remaining));
+  block.append(row,bar,node('p','reset',resetText(q.reset)));card.append(block);
+ }
+ if(account.provider==='Claude'){
+  const counts=node('div','summary');counts.style.marginTop='14px';counts.style.marginBottom='0';
+  counts.append(node('span','chip','Manual resets · '+(account.manualResets??'—')),node('span','chip','Fable resets · '+(account.fableResets??'—')));card.append(counts);
+ }
+ if(account.error)card.append(node('p','message',account.error));
+ return card;
+}
+function render(accounts){
+ $('accounts').replaceChildren();$('summary').replaceChildren();
+ if(!accounts.length){const empty=node('section','empty');empty.append(node('strong','','No connected accounts'),node('p','','Connect an account in CLIProxy, then press Refresh.'));$('accounts').append(empty);return;}
+ const counts=new Map();for(const a of accounts){$('accounts').append(quotaCard(a));counts.set(a.provider,(counts.get(a.provider)||0)+1);}
+ for(const [provider,count] of counts)$('summary').append(node('span','chip',count+' '+provider+(count===1?' account':' accounts')));
+}
+async function loadAccounts(status,files){
+ const accounts=[],used=new Set(),counts=new Map();
+ for(const a of status.accounts||[]){
+  const auth=files.find(f=>f.provider==='codex'&&[f.name,f.id].includes(a.auth_id));if(auth)used.add(auth);
+  const n=(counts.get('Codex')||0)+1;counts.set('Codex',n);
+  accounts.push({provider:'Codex',name:a.alias||'Codex account '+String(n).padStart(2,'0'),identity:masked(auth&&(auth.email||auth.account))||'Codex · OAuth',disabled:!!(auth&&auth.disabled),short:codexWindow(a.five_hour),long:codexWindow(a.long_window)});
+ }
+ for(const f of files){
+  if(used.has(f))continue;
+  const provider=f.provider==='claude'?'Claude':f.provider==='codex'?'Codex':String(f.provider||'Other');
+  const n=(counts.get(provider)||0)+1;counts.set(provider,n);
+  const account={provider,name:provider+' account '+String(n).padStart(2,'0'),identity:masked(f.email||f.account)||provider+' · OAuth',disabled:!!f.disabled,short:{remaining:null},long:{remaining:null}};
+  if(f.disabled)account.error='Account disabled in CLIProxy.';
+  else if(provider==='Claude'&&f.auth_index){
+   try{
+    const result=await api('/v0/management/api-call',{auth_index:f.auth_index,method:'GET',url:'https://api.anthropic.com/api/oauth/usage?cedar_ember=1',header:{Authorization:'Bearer $TOKEN$','anthropic-beta':'oauth-2025-04-20','anthropic-version':'2023-06-01','User-Agent':'claude-cli/2.1.280 (external, cli)'}});
+    if(Number(result.status_code)!==200)throw new Error('Claude usage unavailable. Try Refresh later.');
+    const usage=typeof result.body==='string'?JSON.parse(result.body):result.body;
+    account.short=claudeWindow(usage.five_hour);account.long=claudeWindow(usage.seven_day);
+    account.fable=fableWindow(usage);account.manualResets=claudeResetCount(usage,false);account.fableResets=claudeResetCount(usage,true);
+   }catch(error){if(error instanceof AuthError)throw error;account.error='Claude usage unavailable. Try Refresh later.';}
+  }else account.error=provider==='Codex'?'Waiting for Fleet Manager quota data.':'Quota data unavailable for this account.';
+  accounts.push(account);
+ }
+ return accounts;
+}
+async function refresh(){
+ if(busy)return;key=$('management-key').value.trim();
+ if(!key){$('auth').hidden=false;$('management-key').focus();$('message').textContent='Enter your CLIProxy management key to check limits.';$('message').hidden=false;return;}
+ busy=true;$('refresh').disabled=true;$('refresh').textContent='Refreshing…';$('message').hidden=true;
+ try{
+  let status=await api(fleet+'/status?format=json');
+  if(Date.now()-lastFresh>=60000){await api(fleet+'/refresh',{});lastFresh=Date.now();await new Promise(resolve=>setTimeout(resolve,1800));status=await api(fleet+'/status?format=json');}
+  const roster=await api('/v0/management/auth-files');
+  const accounts=await loadAccounts(status,Array.isArray(roster.files)?roster.files:[]);
+  render(accounts);$('updated').textContent='Updated '+new Intl.DateTimeFormat('en',{hour:'2-digit',minute:'2-digit',second:'2-digit'}).format(new Date())+' · '+accounts.length+' accounts';
+  try{sessionStorage.setItem('proxy-deck-management-key',key);}catch{}
+  $('auth').hidden=true;$('change-key').hidden=false;
+ }catch(error){
+  if(error instanceof AuthError){try{sessionStorage.removeItem('proxy-deck-management-key');}catch{}$('auth').hidden=false;}
+  $('message').textContent=error instanceof AuthError?error.message:'Could not update limits. Check that Proxy Deck and Tailscale are running, then press Refresh.';$('message').hidden=false;
+ }finally{busy=false;$('refresh').disabled=false;$('refresh').textContent='↻  Refresh limits';}
+}
+$('refresh').addEventListener('click',refresh);
+$('management-key').addEventListener('keydown',event=>{if(event.key==='Enter')refresh();});
+$('change-key').addEventListener('click',()=>{$('auth').hidden=false;$('management-key').focus();});
+</script></body></html>
